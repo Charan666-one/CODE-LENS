@@ -50,7 +50,9 @@ hasn't run:
 
 ## Status
 
-The comparison test is **skipped** until `app.parser.parse_repository` exists.
-It is the test the parser must earn its way to passing in CP-1.2, and the alarm
-that fires on any graph drift thereafter. The manifest well-formedness tests run
-today and keep these hand-written files internally consistent.
+**Live since CP-1.2.** `app.parser.parse_repository` exists, and the comparison
+test runs on every commit — it is now the alarm that fires on graph drift.
+
+The manifest-integrity tests run alongside it and check the hand-verification
+itself: that ids follow the convention, every edge endpoint exists, and every
+cited line really does show the definition or reference it claims.
