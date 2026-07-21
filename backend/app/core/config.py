@@ -1,31 +1,45 @@
-from pydantic_settings import BaseSettings
+"""CodeLens configuration — deliberately minimal.
+
+ARCHITECTURE.md §"Two corrections": SQLite + NetworkX now; Postgres, Neo4j,
+Qdrant and Redis arrive only when real load justifies each one individually
+(CHECKPOINTS.md CP-6.1 / CP-9.2).
+
+Nothing here may reference a service that does not exist yet. Config that
+boots five databases for zero users is the exact failure mode this project
+rejected in STRATEGY.md §7.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
     VERSION: str = "2.0"
 
-    DATABASE_URL: str = "postgresql+asyncpg://codelens:codelens_secret@localhost:5432/codelens"
+    # ── Storage (CP-1.4) ──────────────────────────────────────────────────
+    # SQLite is persistence, NetworkX is traversal. One file, no daemon.
+    # All access goes through the GraphStore interface so the backend can be
+    # swapped later without touching a single query.
+    SQLITE_PATH: Path = Path("data/codelens.db")
 
-    REDIS_URL: str = "redis://localhost:6379"
-
-    NEO4J_URI: str = "bolt://localhost:7687"
-    NEO4J_USER: str = "neo4j"
-    NEO4J_PASSWORD: str = "codelens_neo4j"
-
-    OPENAI_API_KEY: str = "sk-placeholder"
-
-    GITHUB_CLIENT_ID: str = "placeholder"
-    GITHUB_CLIENT_SECRET: str = "placeholder"
-
-    JWT_SECRET: str = "codelens-dev-secret-minimum-32-characters"
-    JWT_EXPIRE_HOURS: int = 1
-
+    # ── Ingestion limits (CP-1.1) ─────────────────────────────────────────
+    CLONE_DIR: Path = Path("/tmp/codelens")
     MAX_REPO_SIZE_MB: int = 500
-    MAX_CONCURRENT_JOBS: int = 5
+    CLONE_TIMEOUT_SECONDS: int = 300
 
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
+    # ── Semantic layer (Stage 3) ──────────────────────────────────────────
+    # Unset until CP-3.2. Absence must never break the graph pipeline.
+    ANTHROPIC_API_KEY: str | None = None
+
+    @property
+    def sqlite_url(self) -> str:
+        """SQLAlchemy-style URL, for whenever a driver actually needs one."""
+        return f"sqlite:///{self.SQLITE_PATH}"
 
 
 settings = Settings()

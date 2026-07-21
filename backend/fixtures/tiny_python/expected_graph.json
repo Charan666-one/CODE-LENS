@@ -1,0 +1,41 @@
+{
+  "$comment": "Hand-verified by reading repo/ line by line. See ../README.md for conventions. Builtins (print, range, NotImplementedError) are not nodes. tiny_python is deliberately unambiguous: every CALLS edge resolves statically, so confidence is 'resolved' throughout. Dynamic dispatch is CP-1.3's subject and gets its own fixture there.",
+  "fixture": "tiny_python",
+  "language": "python",
+  "asserted_node_kinds": ["file", "class", "function"],
+  "asserted_edge_kinds": ["imports", "calls", "inherits"],
+
+  "nodes": [
+    { "id": "file:calculator.py", "kind": "file", "name": "calculator.py", "qualified_name": "calculator.py", "file_path": "calculator.py" },
+    { "id": "file:shapes.py", "kind": "file", "name": "shapes.py", "qualified_name": "shapes.py", "file_path": "shapes.py" },
+    { "id": "file:main.py", "kind": "file", "name": "main.py", "qualified_name": "main.py", "file_path": "main.py" },
+
+    { "id": "class:shapes.Shape", "kind": "class", "name": "Shape", "qualified_name": "shapes.Shape", "file_path": "shapes.py", "start_line": 6, "end_line": 11 },
+    { "id": "class:shapes.Rectangle", "kind": "class", "name": "Rectangle", "qualified_name": "shapes.Rectangle", "file_path": "shapes.py", "start_line": 14, "end_line": 23 },
+
+    { "id": "function:calculator.add", "kind": "function", "name": "add", "qualified_name": "calculator.add", "file_path": "calculator.py", "start_line": 4, "end_line": 6 },
+    { "id": "function:calculator.multiply", "kind": "function", "name": "multiply", "qualified_name": "calculator.multiply", "file_path": "calculator.py", "start_line": 9, "end_line": 14 },
+    { "id": "function:shapes.Shape.area", "kind": "function", "name": "area", "qualified_name": "shapes.Shape.area", "file_path": "shapes.py", "start_line": 9, "end_line": 11 },
+    { "id": "function:shapes.Rectangle.__init__", "kind": "function", "name": "__init__", "qualified_name": "shapes.Rectangle.__init__", "file_path": "shapes.py", "start_line": 17, "end_line": 19 },
+    { "id": "function:shapes.Rectangle.area", "kind": "function", "name": "area", "qualified_name": "shapes.Rectangle.area", "file_path": "shapes.py", "start_line": 21, "end_line": 23 },
+    { "id": "function:main.area", "kind": "function", "name": "area", "qualified_name": "main.area", "file_path": "main.py", "start_line": 6, "end_line": 8 },
+    { "id": "function:main.main", "kind": "function", "name": "main", "qualified_name": "main.main", "file_path": "main.py", "start_line": 11, "end_line": 13 }
+  ],
+
+  "edges": [
+    { "source_id": "file:shapes.py", "target_id": "file:calculator.py", "kind": "imports", "file_path": "shapes.py", "line": 3, "confidence": "resolved" },
+    { "source_id": "file:main.py", "target_id": "file:calculator.py", "kind": "imports", "file_path": "main.py", "line": 3, "confidence": "resolved" },
+
+    { "source_id": "class:shapes.Rectangle", "target_id": "class:shapes.Shape", "kind": "inherits", "file_path": "shapes.py", "line": 14, "confidence": "resolved" },
+
+    { "source_id": "function:calculator.multiply", "target_id": "function:calculator.add", "kind": "calls", "file_path": "calculator.py", "line": 13, "confidence": "resolved" },
+    { "source_id": "function:shapes.Rectangle.area", "target_id": "function:calculator.multiply", "kind": "calls", "file_path": "shapes.py", "line": 23, "confidence": "resolved" },
+    { "source_id": "function:main.area", "target_id": "function:calculator.multiply", "kind": "calls", "file_path": "main.py", "line": 8, "confidence": "resolved" },
+    { "source_id": "function:main.main", "target_id": "function:main.area", "kind": "calls", "file_path": "main.py", "line": 13, "confidence": "resolved" },
+    { "source_id": "file:main.py", "target_id": "function:main.main", "kind": "calls", "file_path": "main.py", "line": 17, "confidence": "resolved" }
+  ],
+
+  "entrypoints": [
+    { "id": "function:main.main", "entrypoint_kind": "main" }
+  ]
+}

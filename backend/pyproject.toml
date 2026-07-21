@@ -1,0 +1,36 @@
+[project]
+name = "codelens"
+version = "2.0.0"
+description = "Software Knowledge Graph platform — understand software, not files."
+requires-python = ">=3.12"
+
+# ── Lint ──────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# Golden fixtures are parser INPUT, not our source. They are deliberately
+# small and occasionally odd; linting them would be a category error.
+exclude = ["fixtures", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+# UP042 wants `StrEnum` instead of `(str, Enum)` in graph/schema.py. That file
+# is the frozen contract (FOUNDATION.md §"Immediate next steps" #1), `(str,
+# Enum)` is the deliberate pydantic-idiomatic base, and switching changes what
+# `str(kind)` returns. That is a schema decision, not a lint fix — so it is not
+# made here in passing.
+ignore = ["UP042"]
+
+# ── Types ─────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.12"
+files = ["app"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+exclude = ["fixtures/"]
+
+# ── Tests ─────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"

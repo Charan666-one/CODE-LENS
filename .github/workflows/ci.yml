@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    name: backend (lint · types · tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Types (mypy)
+        run: mypy
+
+      # The golden-fixture comparison (CP-0.2) lives here. It is the test the
+      # parser must earn its way to passing in CP-1.2, and the alarm that
+      # fires on any graph drift thereafter.
+      - name: Tests (pytest)
+        run: pytest -q
