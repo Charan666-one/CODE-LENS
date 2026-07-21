@@ -40,13 +40,17 @@ node/edge of an asserted kind is a failure.
 Deliberately **not** asserted yet, because the checkpoint that decides them
 hasn't run:
 
-- `CONTAINS` and `Repository`/`Module` nodes — module granularity for a flat
-  repo is a CP-1.2 decision.
-- Metrics (`loc`, `complexity`) — radon-specific, asserted once CP-1.2 lands.
-- Non-`resolved` confidence — `tiny_python` is deliberately unambiguous so the
-  structural contract stays crisp. A confidence-focused fixture exercising
-  `heuristic` / `dynamic_unknown` arrives with **CP-1.3**, where dynamic
-  dispatch is the actual subject.
+- `CONTAINS` and `Repository`/`Module` nodes — asserting the structural spine
+  is left to the invariant tests in `tests/test_parser.py`, which check it
+  against real repositories rather than a toy one.
+- Metrics (`loc`, `complexity`) — radon-specific and checked by unit test.
+
+## The fixtures
+
+| Fixture | Subject |
+|---|---|
+| `tiny_python` | The structural contract. Deliberately unambiguous: every call resolves statically, so confidence is `resolved` throughout. |
+| `dynamic_python` | The confidence ladder (CP-1.3). Every tier appears exactly once — `self.setup()` and `super().run()` are `resolved`; a repo-unique method name is `heuristic`; a name defined by two classes is `dynamic_unknown` to both. `service.py` holds two classes on purpose, so a resolver guessing "the file's only class" fails it. |
 
 ## Status
 

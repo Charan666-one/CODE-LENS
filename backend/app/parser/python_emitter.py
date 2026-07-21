@@ -26,6 +26,9 @@ _LANGUAGE = Language(tree_sitter_python.language())
 #: lambdas) is left unresolved rather than guessed at.
 _DOTTED_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
+#: `super().method()` — normalised so the resolver can walk the base classes.
+_SUPER_CALL = re.compile(r"^super\(\s*\)\.([A-Za-z_][A-Za-z0-9_]*)$")
+
 #: Decorator attributes that mark an HTTP handler (FastAPI, Flask, Starlette).
 _HTTP_DECORATORS = frozenset(
     {"get", "post", "put", "patch", "delete", "head", "options", "route", "websocket"}
@@ -53,7 +56,7 @@ class _Context:
     prefix: str  # qualified-name prefix for definitions found here
     container_id: str  # node that CONTAINS definitions found here
     scope_id: str  # node a call site at this level is attributed to
-    class_name: str | None  # innermost enclosing class, for `self.x` resolution
+    class_qname: str | None  # innermost enclosing class, for `self.`/`super()`
 
 
 class PythonEmitter:
@@ -90,7 +93,7 @@ class PythonEmitter:
                 prefix=module_qname,
                 container_id=file_node.id,
                 scope_id=file_node.id,
-                class_name=None,
+                class_qname=None,
             ),
         )
         return facts
@@ -182,6 +185,9 @@ class _FileWalker:
             target = self.facts.module_classes if is_class else self.facts.module_functions
             target.add(name)
 
+        if not is_class and ctx.class_qname is not None:
+            self.facts.methods.add(qualified_name)
+
         if is_class:
             self._record_bases(node, node_id)
             inner = _Context(
@@ -190,14 +196,16 @@ class _FileWalker:
                 # A call in a class body (a default, a decorator argument) is not
                 # inside a function; attribute it to the enclosing scope.
                 scope_id=ctx.scope_id,
-                class_name=name,
+                class_qname=qualified_name,
             )
         else:
             inner = _Context(
                 prefix=qualified_name,
                 container_id=node_id,
                 scope_id=node_id,
-                class_name=ctx.class_name,
+                # A nested function inside a method still sees that method's
+                # class, so `self` keeps its meaning.
+                class_qname=ctx.class_qname,
             )
 
         if body is not None:
@@ -281,7 +289,12 @@ class _FileWalker:
         if callee is None:
             return
         self.facts.calls.append(
-            RawCall(scope_id=ctx.scope_id, callee=callee, line=node.start_point[0] + 1)
+            RawCall(
+                scope_id=ctx.scope_id,
+                callee=callee,
+                line=node.start_point[0] + 1,
+                class_qname=ctx.class_qname,
+            )
         )
 
     def _record_bases(self, node: TSNode, class_id: str) -> None:
@@ -303,7 +316,12 @@ class _FileWalker:
         if function is None or function.text is None:
             return None
         text = function.text.decode("utf-8", errors="replace")
-        return text if _DOTTED_NAME.match(text) else None
+        if _DOTTED_NAME.match(text):
+            return text
+        super_call = _SUPER_CALL.match(text)
+        if super_call is not None:
+            return f"super().{super_call.group(1)}"
+        return None
 
     def _descendant_calls(self, node: TSNode) -> list[TSNode]:
         found: list[TSNode] = []

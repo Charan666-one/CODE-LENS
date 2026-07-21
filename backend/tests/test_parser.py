@@ -97,13 +97,29 @@ def test_parsing_is_deterministic(tmp_path: Path) -> None:
     ]
 
 
-def test_calls_edges_carry_resolved_confidence(codelens_graph: KnowledgeGraph) -> None:
-    """CP-1.2 only emits statically resolved calls; CP-1.3 adds the rest."""
+def test_calls_edges_declare_a_valid_confidence(codelens_graph: KnowledgeGraph) -> None:
+    """Constitution 5: every CALLS edge says how sure it is."""
     from app.graph.schema import CallConfidence
 
     calls = [e for e in codelens_graph.edges if e.kind is EdgeKind.CALLS]
     assert calls
-    assert all(e.confidence is CallConfidence.RESOLVED for e in calls)
+    assert all(isinstance(e.confidence, CallConfidence) for e in calls)
+    # Statically proven edges must exist in bulk. Deliberately NOT asserting
+    # they are the majority: on real dynamic Python they are not (requests
+    # measures ~22% resolved), and encoding that wish would be a false
+    # invariant. Precedence is what matters, and the golden fixtures pin it.
+    assert sum(1 for e in calls if e.confidence is CallConfidence.RESOLVED) > 10
+
+
+def test_non_calls_edges_are_never_labelled_uncertain(
+    codelens_graph: KnowledgeGraph,
+) -> None:
+    """Confidence is only meaningful for CALLS; IMPORTS/INHERITS are proven."""
+    from app.graph.schema import CallConfidence
+
+    for edge in codelens_graph.edges:
+        if edge.kind is not EdgeKind.CALLS:
+            assert edge.confidence is CallConfidence.RESOLVED
 
 
 def test_edges_carry_evidence(codelens_graph: KnowledgeGraph) -> None:
@@ -466,3 +482,214 @@ def test_snapshot_is_carried_through(tmp_path: Path) -> None:
     graph = build(tmp_path, {"m.py": "def a():\n    return 1\n"})
     assert graph.snapshot.primary_language == "Python"
     assert graph.snapshot.file_count == 1
+
+
+# ── 7. The confidence ladder (CP-1.3) ─────────────────────────────────────
+
+
+def call_confidence(graph: KnowledgeGraph, source: str, target: str) -> str | None:
+    for edge in graph.edges:
+        if edge.kind is EdgeKind.CALLS and edge.source_id == source and edge.target_id == target:
+            return edge.confidence.value
+    return None
+
+
+def test_self_resolves_by_call_site_class_not_by_file(tmp_path: Path) -> None:
+    """Two classes in one file: the old 'file's only class' guess was wrong."""
+    graph = build(
+        tmp_path,
+        {
+            "m.py": """
+            class Other:
+                def helper(self):
+                    return 0
+
+            class Real:
+                def go(self):
+                    return self.helper()
+
+                def helper(self):
+                    return 1
+            """
+        },
+    )
+    assert call_confidence(graph, "function:m.Real.go", "function:m.Real.helper") == "resolved"
+    assert call_confidence(graph, "function:m.Real.go", "function:m.Other.helper") is None
+
+
+def test_self_resolves_through_base_classes(tmp_path: Path) -> None:
+    graph = build(
+        tmp_path,
+        {
+            "m.py": """
+            class Mixin:
+                def shared_behaviour(self):
+                    return 1
+
+            class Concrete(Mixin):
+                def go(self):
+                    return self.shared_behaviour()
+            """
+        },
+    )
+    assert (
+        call_confidence(graph, "function:m.Concrete.go", "function:m.Mixin.shared_behaviour")
+        == "resolved"
+    )
+
+
+def test_super_resolves_to_the_base_not_the_caller(tmp_path: Path) -> None:
+    graph = build(
+        tmp_path,
+        {
+            "m.py": """
+            class Base:
+                def act(self):
+                    return 1
+
+            class Child(Base):
+                def act(self):
+                    return super().act()
+            """
+        },
+    )
+    assert call_confidence(graph, "function:m.Child.act", "function:m.Base.act") == "resolved"
+
+
+def test_reexport_chain_through_package_init(tmp_path: Path) -> None:
+    """`from pkg import helper` where pkg/__init__.py re-exports it."""
+    graph = build(
+        tmp_path,
+        {
+            "pkg/__init__.py": "from .impl import helper\n",
+            "pkg/impl.py": "def helper():\n    return 1\n",
+            "main.py": "from pkg import helper\n\ndef run():\n    return helper()\n",
+        },
+    )
+    assert call_confidence(graph, "function:main.run", "function:pkg.impl.helper") == "resolved"
+
+
+def test_unique_method_name_is_heuristic(tmp_path: Path) -> None:
+    graph = build(
+        tmp_path,
+        {
+            "m.py": """
+            class Cache:
+                def invalidate_everything(self):
+                    return True
+
+            def refresh(thing):
+                return thing.invalidate_everything()
+            """
+        },
+    )
+    assert (
+        call_confidence(graph, "function:m.refresh", "function:m.Cache.invalidate_everything")
+        == "heuristic"
+    )
+
+
+def test_ambiguous_method_name_is_dynamic_unknown(tmp_path: Path) -> None:
+    """Over-approximate, but say so: the call could reach either."""
+    graph = build(
+        tmp_path,
+        {
+            "m.py": """
+            class Email:
+                def deliver_payload(self):
+                    return 1
+
+            class Sms:
+                def deliver_payload(self):
+                    return 2
+
+            def send(channel):
+                return channel.deliver_payload()
+            """
+        },
+    )
+    assert (
+        call_confidence(graph, "function:m.send", "function:m.Email.deliver_payload")
+        == "dynamic_unknown"
+    )
+    assert (
+        call_confidence(graph, "function:m.send", "function:m.Sms.deliver_payload")
+        == "dynamic_unknown"
+    )
+
+
+def test_generic_method_names_are_never_guessed(tmp_path: Path) -> None:
+    """`sock.close()` must not "call" a repository class's close()."""
+    graph = build(
+        tmp_path,
+        {
+            "m.py": """
+            class Store:
+                def close(self):
+                    return 1
+
+                def get(self, key):
+                    return key
+
+            def teardown(sock):
+                sock.close()
+                return sock.get("x")
+            """
+        },
+    )
+    assert call_confidence(graph, "function:m.teardown", "function:m.Store.close") is None
+    assert call_confidence(graph, "function:m.teardown", "function:m.Store.get") is None
+
+
+def test_dunder_calls_are_never_guessed(tmp_path: Path) -> None:
+    graph = build(
+        tmp_path,
+        {
+            "m.py": """
+            class Thing:
+                def __len__(self):
+                    return 0
+
+            def measure(x):
+                return x.__len__()
+            """
+        },
+    )
+    assert call_confidence(graph, "function:m.measure", "function:m.Thing.__len__") is None
+
+
+def test_too_many_candidates_yields_no_edge(tmp_path: Path) -> None:
+    """Past the cap an edge to each is noise, not signal."""
+    classes = "\n\n".join(
+        f"class C{i}:\n    def ambiguous_action(self):\n        return {i}" for i in range(6)
+    )
+    graph = build(
+        tmp_path,
+        {"m.py": f"{classes}\n\n\ndef go(thing):\n    return thing.ambiguous_action()\n"},
+    )
+    assert not [
+        e
+        for e in graph.edges
+        if e.kind is EdgeKind.CALLS and e.source_id == "function:m.go"
+    ]
+
+
+def test_static_resolution_beats_the_name_heuristic(tmp_path: Path) -> None:
+    """Precedence: a proof must never be downgraded to a guess."""
+    graph = build(
+        tmp_path,
+        {
+            "m.py": """
+            class Runner:
+                def perform_task(self):
+                    return 1
+
+                def go(self):
+                    return self.perform_task()
+            """
+        },
+    )
+    assert (
+        call_confidence(graph, "function:m.Runner.go", "function:m.Runner.perform_task")
+        == "resolved"
+    )

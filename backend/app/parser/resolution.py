@@ -1,13 +1,24 @@
-"""Pass two — turn per-file observations into edges.
+"""Pass two — turn per-file observations into edges, honestly labelled.
 
-Only resolutions that land on a node actually present in this repository
-become edges. A call to `print`, or to a third-party package, simply produces
-nothing: an edge must have two real endpoints, and inventing a target would be
-exactly the fabrication the fact stratum exists to prevent.
+ARCHITECTURE.md §2 calls call resolution the genuinely hard problem, and the
+design answer is not to solve it perfectly but to *say how sure we are*. Every
+CALLS edge carries a confidence:
 
-CP-1.3 widens this pass — name-based fallbacks and dynamic dispatch get
-`heuristic` / `dynamic_unknown` confidence there. Everything emitted here is
-statically resolved, so it is all `resolved`.
+    resolved         the definition was found by following real symbols —
+                     imports, re-exports, the enclosing class, base classes
+    heuristic        the callee's method name matches exactly one definition in
+                     the repository; duck typing makes that a good bet, not a
+                     proof
+    dynamic_unknown  the name matches several definitions and the receiver's
+                     type is not knowable statically, so the call could reach
+                     any of them
+
+Only the first is a claim. The other two are labelled guesses, which is what
+lets the ripple UI render them differently and the Accuracy Ledger grade them
+separately (Constitution 5: confidence is visible).
+
+Resolution runs in ordered passes because the later ones need the earlier
+ones: calls need the class hierarchy, which needs import maps.
 """
 
 from __future__ import annotations
@@ -15,13 +26,61 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from app.graph.schema import CallConfidence, Edge, EdgeKind, EntrypointKind, Node, NodeKind
-from app.parser.facts import FileFacts, RawImport
+from app.parser.facts import FileFacts, RawCall, RawImport
 
 #: local name -> (qualified name it refers to, whether that name is a module)
 ImportMap = dict[str, tuple[str, bool]]
 
 #: Sink for a resolved edge.
 EmitEdge = Callable[[Edge], None]
+
+#: class qualified name -> its resolved base classes
+Hierarchy = dict[str, list[str]]
+
+#: Above this many same-named candidates, an edge to each is noise rather than
+#: signal — `run()` matching thirty definitions tells a reader nothing.
+_MAX_DYNAMIC_CANDIDATES = 4
+
+#: `a` re-exports `b` re-exports `c`… stop before a cycle becomes a hang.
+_MAX_REEXPORT_DEPTH = 4
+
+#: Better evidence wins when the same relationship is seen twice.
+_CONFIDENCE_RANK = {
+    CallConfidence.RESOLVED: 3,
+    CallConfidence.HEURISTIC: 2,
+    CallConfidence.DYNAMIC_UNKNOWN: 1,
+}
+
+_SELF_PREFIX = "self."
+_SUPER_PREFIX = "super()."
+
+#: Method names too generic to bet on. These belong to stdlib types and
+#: protocols far more often than to repository classes, so matching on them
+#: manufactures confident-looking nonsense: `sock.close()` "calls"
+#: Session.close, `proxies.copy()` "calls" PreparedRequest.copy,
+#: `threading.Event().set()` "calls" RequestsCookieJar.set.
+#:
+#: This gate applies ONLY to the heuristic and dynamic tiers. A statically
+#: resolved `self.close()` is still a proof and still emitted — being generic
+#: is only disqualifying when the name is all the evidence there is.
+_GENERIC_METHOD_NAMES: frozenset[str] = frozenset(
+    {
+        "accept", "acquire", "add", "append", "bind", "clear", "close", "connect",
+        "copy", "count", "decode", "dump", "dumps", "encode", "endswith", "extend",
+        "flush", "format", "get", "index", "insert", "items", "join", "keys",
+        "list", "load", "loads", "lower", "next", "open", "pop", "put", "read",
+        "readline", "readlines", "recv", "release", "remove", "replace", "reverse",
+        "seek", "send", "set", "sort", "split", "startswith", "strip", "tell",
+        "update", "upper", "values", "wait", "write",
+    }
+)
+
+
+def _is_bettable(name: str) -> bool:
+    """Is this method name distinctive enough to guess from?"""
+    if name.startswith("__") and name.endswith("__"):
+        return False  # dunders are protocol hooks, present on everything
+    return name not in _GENERIC_METHOD_NAMES
 
 
 class SymbolTable:
@@ -39,28 +98,64 @@ class SymbolTable:
                 elif node.kind is NodeKind.CLASS:
                     self.classes.setdefault(node.qualified_name, node.id)
 
+        # Bare method name -> every method with that name. The basis of the
+        # heuristic and dynamic tiers. Sorted so output never depends on the
+        # order files happened to be walked in.
+        self.methods_by_name: dict[str, list[str]] = {}
+        every_method: set[str] = set()
+        for file_facts in facts:
+            every_method |= file_facts.methods
+        for qualified_name in sorted(every_method):
+            bare = qualified_name.rsplit(".", 1)[-1]
+            self.methods_by_name.setdefault(bare, []).append(qualified_name)
+
 
 def resolve(facts: list[FileFacts]) -> tuple[list[Edge], dict[str, EntrypointKind]]:
     """Resolve every file's observations into edges and entrypoint markings."""
     table = SymbolTable(facts)
     edges: list[Edge] = []
-    seen: set[tuple[str, str, str]] = set()
-    entrypoints: dict[str, EntrypointKind] = {}
+    index: dict[tuple[str, str, str], int] = {}
 
     def emit(edge: Edge) -> None:
         key = (edge.source_id, edge.target_id, edge.kind.value)
-        if key in seen:
-            return  # one edge per relationship; the first site is the evidence
-        seen.add(key)
-        edges.append(edge)
+        position = index.get(key)
+        if position is None:
+            index[key] = len(edges)
+            edges.append(edge)
+            return
+        # Same relationship seen again: keep whichever evidence is stronger.
+        if _CONFIDENCE_RANK[edge.confidence] > _CONFIDENCE_RANK[edges[position].confidence]:
+            edges[position] = edge
 
+    # 1. Import maps, and the IMPORTS edges they imply.
+    import_maps: dict[str, ImportMap] = {
+        f.path: _build_import_map(f, table, emit) for f in facts
+    }
+    reexports: ImportMapsByModule = {f.module_qname: import_maps[f.path] for f in facts}
+
+    # 2. Base classes, which give us the hierarchy calls will need.
+    hierarchy: Hierarchy = {}
     for file_facts in facts:
-        import_map = _build_import_map(file_facts, table, emit)
-        _resolve_calls(file_facts, table, import_map, emit)
-        _resolve_bases(file_facts, table, import_map, emit)
-        _mark_entrypoints(file_facts, table, import_map, entrypoints)
+        _resolve_bases(file_facts, table, import_maps[file_facts.path], hierarchy, emit)
+
+    # 3. Calls, now that both are available.
+    for file_facts in facts:
+        _resolve_calls(
+            file_facts, table, import_maps[file_facts.path], reexports, hierarchy, emit
+        )
+
+    # 4. Entrypoints.
+    entrypoints: dict[str, EntrypointKind] = {}
+    for file_facts in facts:
+        _mark_entrypoints(
+            file_facts, table, import_maps[file_facts.path], reexports, entrypoints
+        )
 
     return edges, entrypoints
+
+
+#: module qualified name -> that module's import map (its re-export surface)
+ImportMapsByModule = dict[str, ImportMap]
 
 
 # ── imports ───────────────────────────────────────────────────────────────
@@ -139,33 +234,15 @@ def _emit_import_edge(
     )
 
 
-# ── calls and bases ───────────────────────────────────────────────────────
-
-
-def _resolve_calls(
-    facts: FileFacts, table: SymbolTable, import_map: ImportMap, emit: EmitEdge
-) -> None:
-    for call in facts.calls:
-        qualified = _resolve_name(call.callee, facts, import_map)
-        if qualified is None:
-            continue
-        target_id = table.functions.get(qualified)
-        if target_id is None:
-            continue
-        emit(
-            Edge(
-                source_id=call.scope_id,
-                target_id=target_id,
-                kind=EdgeKind.CALLS,
-                file_path=facts.path,
-                line=call.line,
-                confidence=CallConfidence.RESOLVED,
-            )
-        )
+# ── base classes ──────────────────────────────────────────────────────────
 
 
 def _resolve_bases(
-    facts: FileFacts, table: SymbolTable, import_map: ImportMap, emit: EmitEdge
+    facts: FileFacts,
+    table: SymbolTable,
+    import_map: ImportMap,
+    hierarchy: Hierarchy,
+    emit: EmitEdge,
 ) -> None:
     for base in facts.bases:
         qualified = _resolve_name(base.base, facts, import_map, allow_bare_class=True)
@@ -174,6 +251,8 @@ def _resolve_bases(
         target_id = table.classes.get(qualified)
         if target_id is None:
             continue
+        child_qname = base.class_id.split(":", 1)[1]
+        hierarchy.setdefault(child_qname, []).append(qualified)
         emit(
             Edge(
                 source_id=base.class_id,
@@ -183,6 +262,163 @@ def _resolve_bases(
                 line=base.line,
             )
         )
+
+
+# ── calls ─────────────────────────────────────────────────────────────────
+
+
+def _resolve_calls(
+    facts: FileFacts,
+    table: SymbolTable,
+    import_map: ImportMap,
+    reexports: ImportMapsByModule,
+    hierarchy: Hierarchy,
+    emit: EmitEdge,
+) -> None:
+    for call in facts.calls:
+        for target_id, confidence in _call_targets(
+            call, facts, table, import_map, reexports, hierarchy
+        ):
+            emit(
+                Edge(
+                    source_id=call.scope_id,
+                    target_id=target_id,
+                    kind=EdgeKind.CALLS,
+                    file_path=facts.path,
+                    line=call.line,
+                    confidence=confidence,
+                )
+            )
+
+
+def _call_targets(
+    call: RawCall,
+    facts: FileFacts,
+    table: SymbolTable,
+    import_map: ImportMap,
+    reexports: ImportMapsByModule,
+    hierarchy: Hierarchy,
+) -> list[tuple[str, CallConfidence]]:
+    """The confidence ladder: prove it, else bet on it, else admit the ambiguity."""
+    callee = call.callee
+
+    # `super().method()` — skip the class itself and search its bases.
+    if callee.startswith(_SUPER_PREFIX) and call.class_qname is not None:
+        found = _lookup_through_bases(
+            call.class_qname,
+            callee[len(_SUPER_PREFIX) :],
+            table,
+            hierarchy,
+            include_self=False,
+        )
+        return [(found, CallConfidence.RESOLVED)] if found else []
+
+    # `self.method()` — the call site's own class, then everything it inherits.
+    if callee.startswith(_SELF_PREFIX) and call.class_qname is not None:
+        found = _lookup_through_bases(
+            call.class_qname,
+            callee[len(_SELF_PREFIX) :],
+            table,
+            hierarchy,
+            include_self=True,
+        )
+        if found is not None:
+            return [(found, CallConfidence.RESOLVED)]
+        # Not on this class: fall through to the name-based tiers below.
+
+    # Real symbols: module functions, imports, aliases, re-export chains.
+    qualified = _resolve_name(callee, facts, import_map)
+    if qualified is not None:
+        found = _follow_reexports(qualified, table, reexports)
+        if found is not None:
+            return [(found, CallConfidence.RESOLVED)]
+
+    # An attribute call on a value whose type we cannot know. Bet on the name,
+    # but only when the name itself carries information.
+    if "." in callee:
+        bare = callee.rsplit(".", 1)[-1]
+        if not _is_bettable(bare):
+            return []
+        candidates = table.methods_by_name.get(bare, [])
+        if len(candidates) == 1:
+            return [(table.functions[candidates[0]], CallConfidence.HEURISTIC)]
+        if 2 <= len(candidates) <= _MAX_DYNAMIC_CANDIDATES:
+            return [
+                (table.functions[candidate], CallConfidence.DYNAMIC_UNKNOWN)
+                for candidate in candidates
+            ]
+
+    # A bare unresolved name is a local variable, a builtin, or a star-import.
+    # Guessing there would produce far more noise than signal.
+    return []
+
+
+def _lookup_through_bases(
+    class_qname: str,
+    attribute: str,
+    table: SymbolTable,
+    hierarchy: Hierarchy,
+    *,
+    include_self: bool,
+) -> str | None:
+    """Find `attribute` on a class or the classes it inherits from."""
+    for current in _linearise(class_qname, hierarchy):
+        if not include_self and current == class_qname:
+            continue
+        candidate = f"{current}.{attribute}"
+        target_id = table.functions.get(candidate)
+        if target_id is not None:
+            return target_id
+    return None
+
+
+def _linearise(start: str, hierarchy: Hierarchy) -> list[str]:
+    """Breadth-first walk of a class and its bases.
+
+    Not a true C3 linearisation — Python's own MRO needs the full inheritance
+    graph including builtins. Breadth-first matches C3 for the single- and
+    simple-multiple-inheritance shapes that make up almost all real code, and
+    is deterministic, which matters more here than exotic correctness.
+    """
+    order: list[str] = []
+    queue = [start]
+    seen: set[str] = set()
+    while queue:
+        current = queue.pop(0)
+        if current in seen:
+            continue
+        seen.add(current)
+        order.append(current)
+        queue.extend(hierarchy.get(current, []))
+    return order
+
+
+def _follow_reexports(
+    qualified_name: str,
+    table: SymbolTable,
+    reexports: ImportMapsByModule,
+    depth: int = 0,
+) -> str | None:
+    """Resolve to a function id, following `__init__.py` re-export chains.
+
+    `from pkg import helper` names `pkg.helper`, which is not where the
+    function lives — pkg/__init__.py's own `from .impl import helper` is the
+    hop that finds it.
+    """
+    direct = table.functions.get(qualified_name)
+    if direct is not None:
+        return direct
+    if depth >= _MAX_REEXPORT_DEPTH or "." not in qualified_name:
+        return None
+
+    module_part, _, symbol = qualified_name.rpartition(".")
+    binding = reexports.get(module_part, {}).get(symbol)
+    if binding is None or binding[0] == qualified_name:
+        return None
+    return _follow_reexports(binding[0], table, reexports, depth + 1)
+
+
+# ── shared name resolution ────────────────────────────────────────────────
 
 
 def _resolve_name(
@@ -205,11 +441,6 @@ def _resolve_name(
             remainder = segments[cut:]
             return ".".join([base_qname, *remainder]) if remainder else base_qname
 
-    if segments[0] == "self" and len(segments) >= 2:
-        owner = _enclosing_class(facts)
-        if owner is not None:
-            return f"{owner}." + ".".join(segments[1:])
-
     if len(segments) == 1:
         if segments[0] in facts.module_functions:
             return f"{facts.module_qname}.{segments[0]}"
@@ -223,18 +454,6 @@ def _resolve_name(
     return None
 
 
-def _enclosing_class(facts: FileFacts) -> str | None:
-    """Owner for `self.x`, only when the file leaves no ambiguity.
-
-    Proper `self` resolution needs the class the call site sits in, which
-    arrives with CP-1.3's scope-aware resolver. Until then a single-class file
-    is the one case that cannot be wrong.
-    """
-    if len(facts.module_classes) == 1:
-        return f"{facts.module_qname}.{next(iter(facts.module_classes))}"
-    return None
-
-
 # ── entrypoints ───────────────────────────────────────────────────────────
 
 
@@ -242,13 +461,14 @@ def _mark_entrypoints(
     facts: FileFacts,
     table: SymbolTable,
     import_map: ImportMap,
+    reexports: ImportMapsByModule,
     entrypoints: dict[str, EntrypointKind],
 ) -> None:
     for callee in facts.entrypoint_calls:
         qualified = _resolve_name(callee, facts, import_map)
         if qualified is None:
             continue
-        target_id = table.functions.get(qualified)
+        target_id = _follow_reexports(qualified, table, reexports)
         if target_id is not None:
             entrypoints.setdefault(target_id, EntrypointKind.MAIN)
 

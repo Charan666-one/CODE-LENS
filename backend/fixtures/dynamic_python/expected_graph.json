@@ -1,0 +1,49 @@
+{
+  "$comment": "The confidence fixture promised by CP-0.2's README, delivered at CP-1.3. Every tier of the ladder appears exactly once: `self.setup()` and `super().run()` are RESOLVED through the call site's own class and its bases; `cache.invalidate_everything()` is HEURISTIC because the name is unique repo-wide but the receiver's type is unknown; `handler.handle()` is DYNAMIC_UNKNOWN twice because two classes define `handle` and the call could reach either. service.py deliberately holds two classes so that a `self` resolver guessing 'the file's only class' would get it wrong.",
+  "fixture": "dynamic_python",
+  "language": "python",
+  "asserted_node_kinds": ["file", "class", "function"],
+  "asserted_edge_kinds": ["imports", "calls", "inherits"],
+
+  "nodes": [
+    { "id": "file:dispatch.py", "kind": "file", "name": "dispatch.py", "qualified_name": "dispatch.py", "file_path": "dispatch.py" },
+    { "id": "file:handlers.py", "kind": "file", "name": "handlers.py", "qualified_name": "handlers.py", "file_path": "handlers.py" },
+    { "id": "file:inherit.py", "kind": "file", "name": "inherit.py", "qualified_name": "inherit.py", "file_path": "inherit.py" },
+    { "id": "file:service.py", "kind": "file", "name": "service.py", "qualified_name": "service.py", "file_path": "service.py" },
+    { "id": "file:unique.py", "kind": "file", "name": "unique.py", "qualified_name": "unique.py", "file_path": "unique.py" },
+
+    { "id": "class:handlers.EmailHandler", "kind": "class", "name": "EmailHandler", "qualified_name": "handlers.EmailHandler", "file_path": "handlers.py", "start_line": 4, "end_line": 9 },
+    { "id": "class:handlers.SmsHandler", "kind": "class", "name": "SmsHandler", "qualified_name": "handlers.SmsHandler", "file_path": "handlers.py", "start_line": 12, "end_line": 17 },
+    { "id": "class:inherit.Base", "kind": "class", "name": "Base", "qualified_name": "inherit.Base", "file_path": "inherit.py", "start_line": 4, "end_line": 9 },
+    { "id": "class:inherit.Child", "kind": "class", "name": "Child", "qualified_name": "inherit.Child", "file_path": "inherit.py", "start_line": 12, "end_line": 17 },
+    { "id": "class:service.Helper", "kind": "class", "name": "Helper", "qualified_name": "service.Helper", "file_path": "service.py", "start_line": 4, "end_line": 9 },
+    { "id": "class:service.Service", "kind": "class", "name": "Service", "qualified_name": "service.Service", "file_path": "service.py", "start_line": 12, "end_line": 21 },
+    { "id": "class:unique.Cache", "kind": "class", "name": "Cache", "qualified_name": "unique.Cache", "file_path": "unique.py", "start_line": 4, "end_line": 9 },
+
+    { "id": "function:dispatch.dispatch", "kind": "function", "name": "dispatch", "qualified_name": "dispatch.dispatch", "file_path": "dispatch.py", "start_line": 6, "end_line": 8 },
+    { "id": "function:dispatch.build", "kind": "function", "name": "build", "qualified_name": "dispatch.build", "file_path": "dispatch.py", "start_line": 11, "end_line": 15 },
+    { "id": "function:handlers.EmailHandler.handle", "kind": "function", "name": "handle", "qualified_name": "handlers.EmailHandler.handle", "file_path": "handlers.py", "start_line": 7, "end_line": 9 },
+    { "id": "function:handlers.SmsHandler.handle", "kind": "function", "name": "handle", "qualified_name": "handlers.SmsHandler.handle", "file_path": "handlers.py", "start_line": 15, "end_line": 17 },
+    { "id": "function:inherit.Base.run", "kind": "function", "name": "run", "qualified_name": "inherit.Base.run", "file_path": "inherit.py", "start_line": 7, "end_line": 9 },
+    { "id": "function:inherit.Child.run", "kind": "function", "name": "run", "qualified_name": "inherit.Child.run", "file_path": "inherit.py", "start_line": 15, "end_line": 17 },
+    { "id": "function:service.Helper.assist", "kind": "function", "name": "assist", "qualified_name": "service.Helper.assist", "file_path": "service.py", "start_line": 7, "end_line": 9 },
+    { "id": "function:service.Service.start", "kind": "function", "name": "start", "qualified_name": "service.Service.start", "file_path": "service.py", "start_line": 15, "end_line": 17 },
+    { "id": "function:service.Service.setup", "kind": "function", "name": "setup", "qualified_name": "service.Service.setup", "file_path": "service.py", "start_line": 19, "end_line": 21 },
+    { "id": "function:unique.Cache.invalidate_everything", "kind": "function", "name": "invalidate_everything", "qualified_name": "unique.Cache.invalidate_everything", "file_path": "unique.py", "start_line": 7, "end_line": 9 },
+    { "id": "function:unique.refresh", "kind": "function", "name": "refresh", "qualified_name": "unique.refresh", "file_path": "unique.py", "start_line": 12, "end_line": 14 }
+  ],
+
+  "edges": [
+    { "source_id": "file:dispatch.py", "target_id": "file:handlers.py", "kind": "imports", "file_path": "dispatch.py", "line": 3, "confidence": "resolved" },
+
+    { "source_id": "class:inherit.Child", "target_id": "class:inherit.Base", "kind": "inherits", "file_path": "inherit.py", "line": 12, "confidence": "resolved" },
+
+    { "source_id": "function:service.Service.start", "target_id": "function:service.Service.setup", "kind": "calls", "file_path": "service.py", "line": 17, "confidence": "resolved" },
+    { "source_id": "function:inherit.Child.run", "target_id": "function:inherit.Base.run", "kind": "calls", "file_path": "inherit.py", "line": 17, "confidence": "resolved" },
+    { "source_id": "function:unique.refresh", "target_id": "function:unique.Cache.invalidate_everything", "kind": "calls", "file_path": "unique.py", "line": 14, "confidence": "heuristic" },
+    { "source_id": "function:dispatch.dispatch", "target_id": "function:handlers.EmailHandler.handle", "kind": "calls", "file_path": "dispatch.py", "line": 8, "confidence": "dynamic_unknown" },
+    { "source_id": "function:dispatch.dispatch", "target_id": "function:handlers.SmsHandler.handle", "kind": "calls", "file_path": "dispatch.py", "line": 8, "confidence": "dynamic_unknown" }
+  ],
+
+  "entrypoints": []
+}

@@ -35,6 +35,10 @@ class RawCall:
     scope_id: str  # enclosing function node id, or the file node id at module scope
     callee: str  # dotted source text, e.g. "add", "self.area", "calculator.add"
     line: int
+    # Qualified name of the class this call sits inside, if any. `self.x` and
+    # `super().x` are only resolvable with it — the previous "file has exactly
+    # one class" guess was wrong the moment a file had two.
+    class_qname: str | None = None
 
 
 @dataclass
@@ -61,4 +65,5 @@ class FileFacts:
     bases: list[RawBase] = field(default_factory=list)
     module_functions: set[str] = field(default_factory=set)  # top-level def names
     module_classes: set[str] = field(default_factory=set)  # top-level class names
+    methods: set[str] = field(default_factory=set)  # qualified names of methods
     entrypoint_calls: list[str] = field(default_factory=list)  # callees in __main__ guard
