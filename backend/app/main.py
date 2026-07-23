@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router as api_router
+from app.api.semantic_routes import router as semantic_router
 from app.core.config import settings
 
 
@@ -24,6 +25,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(api_router)
+    app.include_router(semantic_router)
 
     @app.get("/health", tags=["System"])
     async def health():
