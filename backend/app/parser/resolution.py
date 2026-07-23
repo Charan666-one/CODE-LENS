@@ -88,7 +88,16 @@ class SymbolTable:
 
     def __init__(self, facts: list[FileFacts]) -> None:
         self.modules: dict[str, str] = {f.module_qname: f.path for f in facts}
+        # JS's `index.js` is Python's `__init__.py`: importing './store' should
+        # find store/index.js. Alias the parent qname; setdefault so a real
+        # module named `store` (store.js) always wins over the alias.
+        for f in facts:
+            if f.module_qname.endswith(".index") and f.path.endswith(
+                ("index.js", "index.jsx", "index.mjs", "index.cjs")
+            ):
+                self.modules.setdefault(f.module_qname[: -len(".index")], f.path)
         self.file_ids: dict[str, str] = {f.path: f.file_node.id for f in facts}
+        self._qname_by_path: dict[str, str] = {f.path: f.module_qname for f in facts}
         self.functions: dict[str, str] = {}
         self.classes: dict[str, str] = {}
         for file_facts in facts:
@@ -97,7 +106,18 @@ class SymbolTable:
                     self.functions.setdefault(node.qualified_name, node.id)
                 elif node.kind is NodeKind.CLASS:
                     self.classes.setdefault(node.qualified_name, node.id)
+        self._init_methods_index(facts)
 
+    def canonical_module(self, module_qname: str) -> str:
+        """The real qname of the file a module name lands on. Identity for
+        Python; for JS it maps an aliased `store` to `store.index`, so that
+        symbol candidates are built against names that actually exist."""
+        path = self.modules.get(module_qname)
+        if path is None:
+            return module_qname
+        return self._qname_by_path.get(path, module_qname)
+
+    def _init_methods_index(self, facts: list[FileFacts]) -> None:
         # Bare method name -> every method with that name. The basis of the
         # heuristic and dynamic tiers. Sorted so output never depends on the
         # order files happened to be walked in.
@@ -166,7 +186,9 @@ def _build_import_map(facts: FileFacts, table: SymbolTable, emit: EmitEdge) -> I
     import_map: ImportMap = {}
 
     for raw in facts.imports:
-        target_module = _target_module(raw, facts)
+        # Canonicalise so symbol candidates use the qname the target file
+        # really has ('store' -> 'store.index' when store/index.js answered).
+        target_module = table.canonical_module(_target_module(raw, facts))
 
         if not raw.names:  # plain `import a.b.c`
             head = target_module.split(".")[0]

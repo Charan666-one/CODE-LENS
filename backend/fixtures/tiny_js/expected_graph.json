@@ -1,0 +1,41 @@
+{
+  "$comment": "tiny_python's mirror in JavaScript — the proof that a second language emits into the SAME schema. Exercises ESM named import (shapes.js), CommonJS destructured require (main.js), class/extends, this.-> self resolution inside Rectangle.area, bare super() correctly producing no edge, console.log correctly producing no edge (no such method in the repo), and Node's `if (require.main === module)` guard marking main as entrypoint. Hand-verified line by line.",
+  "fixture": "tiny_js",
+  "language": "javascript",
+  "asserted_node_kinds": ["file", "class", "function"],
+  "asserted_edge_kinds": ["imports", "calls", "inherits"],
+
+  "nodes": [
+    { "id": "file:calculator.js", "kind": "file", "name": "calculator.js", "qualified_name": "calculator.js", "file_path": "calculator.js" },
+    { "id": "file:shapes.js", "kind": "file", "name": "shapes.js", "qualified_name": "shapes.js", "file_path": "shapes.js" },
+    { "id": "file:main.js", "kind": "file", "name": "main.js", "qualified_name": "main.js", "file_path": "main.js" },
+
+    { "id": "class:shapes.Shape", "kind": "class", "name": "Shape", "qualified_name": "shapes.Shape", "file_path": "shapes.js", "start_line": 5, "end_line": 9 },
+    { "id": "class:shapes.Rectangle", "kind": "class", "name": "Rectangle", "qualified_name": "shapes.Rectangle", "file_path": "shapes.js", "start_line": 11, "end_line": 21 },
+
+    { "id": "function:calculator.add", "kind": "function", "name": "add", "qualified_name": "calculator.add", "file_path": "calculator.js", "start_line": 3, "end_line": 5 },
+    { "id": "function:calculator.multiply", "kind": "function", "name": "multiply", "qualified_name": "calculator.multiply", "file_path": "calculator.js", "start_line": 7, "end_line": 13 },
+    { "id": "function:shapes.Shape.area", "kind": "function", "name": "area", "qualified_name": "shapes.Shape.area", "file_path": "shapes.js", "start_line": 6, "end_line": 8 },
+    { "id": "function:shapes.Rectangle.constructor", "kind": "function", "name": "constructor", "qualified_name": "shapes.Rectangle.constructor", "file_path": "shapes.js", "start_line": 12, "end_line": 16 },
+    { "id": "function:shapes.Rectangle.area", "kind": "function", "name": "area", "qualified_name": "shapes.Rectangle.area", "file_path": "shapes.js", "start_line": 18, "end_line": 20 },
+    { "id": "function:main.area", "kind": "function", "name": "area", "qualified_name": "main.area", "file_path": "main.js", "start_line": 5, "end_line": 7 },
+    { "id": "function:main.main", "kind": "function", "name": "main", "qualified_name": "main.main", "file_path": "main.js", "start_line": 9, "end_line": 11 }
+  ],
+
+  "edges": [
+    { "source_id": "file:shapes.js", "target_id": "file:calculator.js", "kind": "imports", "file_path": "shapes.js", "line": 3, "confidence": "resolved" },
+    { "source_id": "file:main.js", "target_id": "file:calculator.js", "kind": "imports", "file_path": "main.js", "line": 3, "confidence": "resolved" },
+
+    { "source_id": "class:shapes.Rectangle", "target_id": "class:shapes.Shape", "kind": "inherits", "file_path": "shapes.js", "line": 11, "confidence": "resolved" },
+
+    { "source_id": "function:calculator.multiply", "target_id": "function:calculator.add", "kind": "calls", "file_path": "calculator.js", "line": 10, "confidence": "resolved" },
+    { "source_id": "function:shapes.Rectangle.area", "target_id": "function:calculator.multiply", "kind": "calls", "file_path": "shapes.js", "line": 19, "confidence": "resolved" },
+    { "source_id": "function:main.area", "target_id": "function:calculator.multiply", "kind": "calls", "file_path": "main.js", "line": 6, "confidence": "resolved" },
+    { "source_id": "function:main.main", "target_id": "function:main.area", "kind": "calls", "file_path": "main.js", "line": 10, "confidence": "resolved" },
+    { "source_id": "file:main.js", "target_id": "function:main.main", "kind": "calls", "file_path": "main.js", "line": 14, "confidence": "resolved" }
+  ],
+
+  "entrypoints": [
+    { "id": "function:main.main", "entrypoint_kind": "main" }
+  ]
+}

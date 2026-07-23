@@ -29,7 +29,7 @@ from app.graph.schema import KnowledgeGraph, NodeKind
 from app.graph.store import GraphStore
 from app.ingestion import IngestedRepo, ingest
 from app.ingestion.git_history import apply_history, collect_history
-from app.parser import parse_ingested
+from app.parser import PARSED_EXTENSIONS, parse_ingested
 
 
 class Stage(str, Enum):
@@ -116,9 +116,13 @@ def run_pipeline(
 
 
 def _inventory_digest(ingested: IngestedRepo) -> str:
-    """Digest of what the parser would read: the Python files and their hashes."""
+    """Digest of exactly what the parser would read, in every language it
+    speaks. Keyed to PARSED_EXTENSIONS so adding a language automatically
+    invalidates stale graphs that predate it."""
     lines = sorted(
-        f"{f.path}:{f.content_hash}" for f in ingested.files if f.extension in ("py", "pyi")
+        f"{f.path}:{f.content_hash}"
+        for f in ingested.files
+        if f.extension in PARSED_EXTENSIONS
     )
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()
 

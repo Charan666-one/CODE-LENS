@@ -17,13 +17,18 @@ from pathlib import Path, PurePosixPath
 from app.graph.schema import Edge, EdgeKind, KnowledgeGraph, Node, NodeKind
 from app.ingestion import IngestedRepo, snapshot_directory
 from app.parser.facts import FileFacts
+from app.parser.js_emitter import JsEmitter
 from app.parser.python_emitter import PythonEmitter, module_qname_for
 from app.parser.resolution import apply_entrypoints, resolve
 
-__all__ = ["module_qname_for", "parse_ingested", "parse_repository"]
+__all__ = ["PARSED_EXTENSIONS", "module_qname_for", "parse_ingested", "parse_repository"]
 
-#: Extensions this engine can read today. JS/TS joins at CP-9.1.
 _PYTHON_EXTENSIONS = frozenset({"py", "pyi"})
+_JS_EXTENSIONS = frozenset({"js", "jsx", "mjs", "cjs"})
+
+#: Everything the engine can read today. TypeScript needs its own grammar
+#: (tree-sitter-typescript) and joins later — saying so beats half-parsing it.
+PARSED_EXTENSIONS = _PYTHON_EXTENSIONS | _JS_EXTENSIONS
 
 
 def parse_repository(root: Path | str, *, max_size_mb: int | None = None) -> KnowledgeGraph:
@@ -36,17 +41,27 @@ def parse_repository(root: Path | str, *, max_size_mb: int | None = None) -> Kno
 
 
 def parse_ingested(ingested: IngestedRepo) -> KnowledgeGraph:
-    """Parse an already-ingested repository into a KnowledgeGraph."""
-    emitter = PythonEmitter()
+    """Parse an already-ingested repository into a KnowledgeGraph.
+
+    One emitter per language, one schema for all of them: the dispatch below
+    is the *entire* per-language surface of the pipeline.
+    """
+    python_emitter = PythonEmitter()
+    js_emitter = JsEmitter()
     facts: list[FileFacts] = []
 
     for source_file in ingested.files:
-        if source_file.extension not in _PYTHON_EXTENSIONS:
+        if source_file.extension not in PARSED_EXTENSIONS:
             continue
         try:
             source = (ingested.root / source_file.path).read_bytes()
         except OSError:
             continue  # vanished or unreadable: skip the file, not the repo
+        emitter = (
+            python_emitter
+            if source_file.extension in _PYTHON_EXTENSIONS
+            else js_emitter
+        )
         facts.append(
             emitter.emit(
                 path=source_file.path,

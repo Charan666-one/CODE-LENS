@@ -71,7 +71,8 @@ def test_at_least_one_fixture_exists() -> None:
 
 @fixture_case
 def test_fixture_repo_has_source(fixture_dir: Path) -> None:
-    assert any((fixture_dir / "repo").rglob("*.py"))
+    repo = fixture_dir / "repo"
+    assert any(repo.rglob("*.py")) or any(repo.rglob("*.js"))
 
 
 @fixture_case
