@@ -206,6 +206,43 @@ Every `NarratedAnswer` carries `evidence_ids`. A claim without receipts does not
 
 ---
 
+# Stage 4 (part 1) — The visualization engine's truth, and the HTTP door
+
+## CP-4.1 · The ViewSpec compiler — the frontend renders, the server decides
+**File:** `backend/app/views/viewspec.py`
+
+**What we did.** A compiler from a stored graph to a **ViewSpec** — the complete, renderable description of one zoom level: which nodes exist, where they sit, what color they are, and in what order they assemble. The frontend's only job is to draw it.
+
+**The three ideas:**
+1. **Semantic zoom** — L1 shows *districts* (top-level modules) with aggregated, weighted flows; L2 resolves to files; L3 adds classes and functions orbiting their files. Zooming changes *what exists*, not magnification. The tests assert the three levels are genuinely different worlds.
+2. **Layout is server truth.** Districts sit on a ring sized by member count; members fill each district on a golden-angle sunflower spiral with the biggest hub dead center. Pure trigonometry — deterministic, dependency-free, and the reason a future 50k-file monorepo at L1 is still just a handful of nodes.
+3. **Edges lift honestly.** A function→function call at L2 surfaces as its *files'* relationship — aggregated, weight counted, confidence reported as the **weakest** aggregated link. Nothing dangles; nothing pretends.
+
+Colors are the risk formula; entrypoints get the accent; `assembly_index` replays construction order (entrypoint files first, BFS through IMPORTS). Honest theater, precomputed.
+
+## The API layer — thin routes, and a threading lesson
+**Files:** `backend/app/api/routes.py`, `backend/app/api/semantic_routes.py`
+
+Every endpoint is a straight line to a tested system: analyze → pipeline, viewspec → compiler, query → registry, search/answers → semantic layer. The CP-1.1 **trust boundary is enforced at the HTTP door**: URLs only, local paths only behind a dev flag, hostile `ext::` strings routed to URL validation. The fact/prose split is visible in status codes — deterministic answers never need a key; narrated ones 503 cleanly without one; unknown nodes are rejected *before* any tokens would be spent.
+
+**Bug worth remembering:** SQLite connections are thread-bound by default, and FastAPI serves sync endpoints from a thread pool — the store worked in every test until a real HTTP request hit it. `check_same_thread=False` (safe for the single-process MVP) fixed it. *Test through the real serving path at least once.*
+
+## The JS emitter — the second language proves the schema
+**Files:** `backend/app/parser/js_emitter.py`, `backend/fixtures/tiny_js/`
+
+FOUNDATION's MVP language list was always "Python + JS/TS". The JavaScript emitter keeps the architecture's central promise: **a new language is a new emitter into the same schema** — the schema file is untouched, and nothing downstream knows a second language exists. The dispatch in `parse_ingested` is the *entire* per-language surface.
+
+**What made JS genuinely different:**
+- **Two import systems.** ESM (`import {x} from './m.js'`) and CommonJS (`const {x} = require('./m')`) both bind names; only *relative* specifiers bind — `require('react')` is an external package, and a repo file named `react.js` must never be mistaken for it.
+- **Assignment-defined APIs.** Express's entire public surface is `res.send = function send() {…}` and `exports.foo = function`. Before handling assignments, `lib/response.js` parsed to **zero functions**; after, express went from 88 → 168 functions and 53 → 379 labeled call edges. *The aggregate looked fine until we knew what was missing — know the idioms of the language you claim to parse.*
+- **`index.js` is `__init__.py`.** `require('./store')` must find `store/index.js`. The fix taught a general lesson: resolution has to build symbol candidates against the qname the target file *really* has (`canonical_module`), not the textual name the import used.
+- **`this.` is `self.`, `super.x` is `super().x`** — normalized at emit time so the same resolution ladder serves both languages, confidence tiers included.
+- Cyclomatic complexity is a decision-point *count* (radon is Python-only) — documented as a ranking estimate, never an exact measurement.
+
+Python's resolution was regression-checked byte-identical after all of it (221/118/72 on requests).
+
+---
+
 # The through-lines (if you remember five things)
 
 1. **Facts and interpretations never mix.** Parser emits facts; AI emits annotations that point at facts (`derived_from`). Every layer enforces this in its types, and tests make unsourced claims unconstructible.
@@ -217,12 +254,12 @@ Every `NarratedAnswer` carries `evidence_ids`. A claim without receipts does not
 ## Where we are on the map
 
 ```
-Stage 0 ✅ → Stage 1 ✅ (M1: the graph) → Stage 2 ✅ (queries) → Stage 3 ✅ (AI at the edge)
-                                                                        │
-                                             next → Stage 4: the Hero Moment (frontend)
-                                                    then CP-5.1 — the gate that decides everything
+Stage 0 ✅ → Stage 1 ✅ (M1) → Stage 2 ✅ → Stage 3 ✅ → Stage 4: compiler+API ✅ · renderer parked
+Languages: Python ✅ + JavaScript ✅ (TS needs its own grammar)
+                                              │
+                       remaining → the frontend (deliberately last) → CP-5.1, the gate
 ```
 
-What Stage 3's completion means: **8 of the 10 launch questions have working machinery** (Q1, Q3, Q4, Q6, Q7, Q8, Q9, Q10 — Q2/Q5 need module summaries wired to the modules query, a small step). The M2/M3 milestone gate ("8/10 correct on an unfamiliar repo, judged by someone who knows it") needs a real LLM key and a human judge — run it before calling Stage 3 formally closed.
+The 10 launch questions are now **callable over HTTP** end-to-end. Two things stand before the frontend work resumes: the M2/M3 formal gate ("8/10 correct on an unfamiliar repo") needs a real LLM key and a human judge, and the repo still has no git remote.
 
-*Generated at the close of the Stage-1-through-3 build session, July 22, 2026.*
+*Written across the Stage-1-through-4 build sessions, July 22–23, 2026.*
