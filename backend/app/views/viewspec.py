@@ -104,10 +104,36 @@ def compile_viewspec(graph: KnowledgeGraph, *, zoom: int = 2) -> ViewSpec:
     ])
 
     if zoom == 1:
-        return _district_view(graph, view, files, cluster_of, centers, risk_of, assembly)
-    return _street_view(
-        graph, view, files, cluster_of, centers, risk_of, assembly, include_members=zoom == 3
-    )
+        spec = _district_view(graph, view, files, cluster_of, centers, risk_of, assembly)
+    else:
+        spec = _street_view(
+            graph, view, files, cluster_of, centers, risk_of, assembly,
+            include_members=zoom == 3,
+        )
+    return _recenter(spec)
+
+
+def _recenter(spec: ViewSpec) -> ViewSpec:
+    """Shift everything so the node centroid sits at the origin.
+
+    Clusters are placed on a ring by geometric position, but real repos are
+    lopsided — a 19-file `src` and a 1-file `docs` get equal arcs, leaving the
+    visual mass off to one side. The renderer fits the geometric bounding box,
+    so without this the dense districts drift to a corner. Centering on the
+    centroid (which the dense districts dominate) puts the mass on screen.
+    Deterministic: a pure translation of already-deterministic positions.
+    """
+    if not spec.nodes:
+        return spec
+    cx = sum(node.x for node in spec.nodes) / len(spec.nodes)
+    cy = sum(node.y for node in spec.nodes) / len(spec.nodes)
+    for node in spec.nodes:
+        node.x -= cx
+        node.y -= cy
+    for cluster in spec.clusters:
+        cluster.x -= cx
+        cluster.y -= cy
+    return spec
 
 
 # ── zoom 1: districts ─────────────────────────────────────────────────────

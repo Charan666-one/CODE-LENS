@@ -80,6 +80,11 @@ export default function GraphCanvas() {
     });
 
     sigmaRef.current = sigma;
+    // Frame the whole city on load. Sigma's default camera doesn't fit custom
+    // coordinates to the viewport on its own, which left the graph small and
+    // low; refresh + reset centers the bounding box and fills the screen.
+    sigma.refresh();
+    sigma.getCamera().animatedReset({ duration: 0 });
     return () => {
       sigma.kill();
       sigmaRef.current = null;

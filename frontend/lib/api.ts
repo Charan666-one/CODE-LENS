@@ -33,7 +33,9 @@ export async function fetchViewSpec(
   zoom: number,
 ): Promise<ViewSpec> {
   const response = await expectOk(
-    await fetch(`/api/repos/${snapshotId}/viewspec?zoom=${zoom}`),
+    await fetch(`/api/repos/${snapshotId}/viewspec?zoom=${zoom}`, {
+      cache: "no-store",
+    }),
   );
   return response.json();
 }
