@@ -46,6 +46,7 @@ __all__ = [
     "RepoTooLargeError",
     "SourceFile",
     "ingest",
+    "looks_like_remote",
     "snapshot_directory",
 ]
 
@@ -56,6 +57,12 @@ _BYTES_PER_MB = 1024 * 1024
 #: routed to URL validation and rejected there with a truthful message, never
 #: fall through to the local-path branch and get refused by accident.
 _REMOTE_LIKE = re.compile(r"^[A-Za-z0-9_+.-]+::|^[^/\s]+@[^/\s]+:")
+
+
+def looks_like_remote(text: str) -> bool:
+    """True when `text` must be treated as a repository remote, not a local
+    path — the API layer uses this to route strings to URL validation."""
+    return "://" in text or bool(_REMOTE_LIKE.search(text))
 
 
 class IngestedRepo(BaseModel):

@@ -87,6 +87,10 @@ class GraphStore(ABC):
         """Load the latest (or a specific) snapshot of a repository."""
 
     @abstractmethod
+    def load_graph_by_id(self, snapshot_id: int) -> KnowledgeGraph | None:
+        """Load one specific snapshot — the API's handle onto stored graphs."""
+
+    @abstractmethod
     def find_snapshot(self, repo_url: str, commit_sha: str) -> int | None:
         """Snapshot id if this exact state is already stored — the skip check."""
 
@@ -114,7 +118,12 @@ class SQLiteGraphStore(GraphStore):
         self.path = Path(path)
         if self.path.parent and str(self.path.parent) not in (".", ""):
             self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(self.path)
+        # check_same_thread=False: FastAPI serves sync endpoints from a thread
+        # pool, so the request thread differs from the one that opened the
+        # connection. Safe for the MVP's one-process access pattern — writes
+        # are wrapped in transactions; concurrent-writer setups arrive with
+        # the job queue in CP-6.2, which brings its own storage story.
+        self._connection = sqlite3.connect(self.path, check_same_thread=False)
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._connection.executescript(_SCHEMA)
 
@@ -176,8 +185,9 @@ class SQLiteGraphStore(GraphStore):
         row = self._find_snapshot_row(repo_url, commit_sha)
         if row is None:
             return None
-        snapshot_id, snapshot_json = row
+        return self._load_rows(row[0], row[1])
 
+    def _load_rows(self, snapshot_id: int, snapshot_json: str) -> KnowledgeGraph:
         nodes = [
             Node.model_validate_json(data)
             for (data,) in self._connection.execute(
@@ -196,6 +206,14 @@ class SQLiteGraphStore(GraphStore):
             edges=edges,
             annotations=self.load_annotations(snapshot_id),
         )
+
+    def load_graph_by_id(self, snapshot_id: int) -> KnowledgeGraph | None:
+        row = self._connection.execute(
+            "SELECT snapshot_id, data FROM snapshots WHERE snapshot_id = ?", (snapshot_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._load_rows(int(row[0]), row[1])
 
     def find_snapshot(self, repo_url: str, commit_sha: str) -> int | None:
         row = self._connection.execute(
