@@ -12,7 +12,12 @@ without either (ARCHITECTURE.md corollary 1).
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path, PurePosixPath
+
+import tree_sitter_typescript
+from tree_sitter import Language
 
 from app.graph.schema import Edge, EdgeKind, KnowledgeGraph, Node, NodeKind
 from app.ingestion import IngestedRepo, snapshot_directory
@@ -25,10 +30,14 @@ __all__ = ["PARSED_EXTENSIONS", "module_qname_for", "parse_ingested", "parse_rep
 
 _PYTHON_EXTENSIONS = frozenset({"py", "pyi"})
 _JS_EXTENSIONS = frozenset({"js", "jsx", "mjs", "cjs"})
+_TS_EXTENSIONS = frozenset({"ts", "tsx"})
 
-#: Everything the engine can read today. TypeScript needs its own grammar
-#: (tree-sitter-typescript) and joins later — saying so beats half-parsing it.
-PARSED_EXTENSIONS = _PYTHON_EXTENSIONS | _JS_EXTENSIONS
+#: Everything the engine can read today: Python, JavaScript, TypeScript.
+PARSED_EXTENSIONS = _PYTHON_EXTENSIONS | _JS_EXTENSIONS | _TS_EXTENSIONS
+
+#: The two TypeScript grammars — .ts is the plain grammar, .tsx allows JSX.
+_TS_LANGUAGE = Language(tree_sitter_typescript.language_typescript())
+_TSX_LANGUAGE = Language(tree_sitter_typescript.language_tsx())
 
 
 def parse_repository(root: Path | str, *, max_size_mb: int | None = None) -> KnowledgeGraph:
@@ -46,22 +55,27 @@ def parse_ingested(ingested: IngestedRepo) -> KnowledgeGraph:
     One emitter per language, one schema for all of them: the dispatch below
     is the *entire* per-language surface of the pipeline.
     """
+    aliases = _read_path_aliases(ingested.root)
     python_emitter = PythonEmitter()
-    js_emitter = JsEmitter()
+    js_emitter = JsEmitter(aliases=aliases)
+    ts_emitter = JsEmitter(_TS_LANGUAGE, "TypeScript", aliases)
+    tsx_emitter = JsEmitter(_TSX_LANGUAGE, "TypeScript", aliases)
+    by_extension = {
+        **dict.fromkeys(_PYTHON_EXTENSIONS, python_emitter),
+        **dict.fromkeys(_JS_EXTENSIONS, js_emitter),
+        "ts": ts_emitter,
+        "tsx": tsx_emitter,
+    }
     facts: list[FileFacts] = []
 
     for source_file in ingested.files:
-        if source_file.extension not in PARSED_EXTENSIONS:
+        emitter = by_extension.get(source_file.extension)
+        if emitter is None:
             continue
         try:
             source = (ingested.root / source_file.path).read_bytes()
         except OSError:
             continue  # vanished or unreadable: skip the file, not the repo
-        emitter = (
-            python_emitter
-            if source_file.extension in _PYTHON_EXTENSIONS
-            else js_emitter
-        )
         facts.append(
             emitter.emit(
                 path=source_file.path,
@@ -76,6 +90,45 @@ def parse_ingested(ingested: IngestedRepo) -> KnowledgeGraph:
     apply_entrypoints(nodes, entrypoints)
 
     return KnowledgeGraph(snapshot=ingested.snapshot, nodes=nodes, edges=edges)
+
+
+def _read_path_aliases(root: Path) -> dict[str, str]:
+    """tsconfig/jsconfig `compilerOptions.paths` -> {alias_prefix: module_prefix}.
+
+    Turns `@/components/*` -> `./src/components/*` into `{"@/": "src."}`, so the
+    emitter can resolve `@/components/Navbar` to the real file. tsconfig is
+    JSON-with-comments; comments and trailing commas are stripped before
+    parsing, and any failure falls back to the near-universal Next.js default
+    (`@/` -> `src.` when a src/ dir exists, else repo root). Best-effort by
+    design: a missing alias just means a missing edge, never a crash.
+    """
+    aliases: dict[str, str] = {}
+    for name in ("tsconfig.json", "jsconfig.json"):
+        config_path = root / name
+        if not config_path.is_file():
+            continue
+        try:
+            text = re.sub(r"//[^\n]*", "", config_path.read_text(errors="replace"))
+            text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+            text = re.sub(r",(\s*[}\]])", r"\1", text)  # trailing commas
+            config = json.loads(text)
+            options = config.get("compilerOptions", {})
+            base = str(options.get("baseUrl", ".")).strip("./")
+            for pattern, targets in (options.get("paths") or {}).items():
+                if not targets:
+                    continue
+                prefix = pattern.replace("*", "")
+                target = str(targets[0]).replace("*", "").strip("./").replace("/", ".")
+                if base and base != ".":
+                    target = f"{base}.{target}" if target else base
+                aliases[prefix] = f"{target}." if target and not target.endswith(".") else target
+        except (OSError, ValueError):
+            continue
+        if aliases:
+            return aliases
+
+    # No usable config: the Next.js convention.
+    return {"@/": "src." if (root / "src").is_dir() else ""}
 
 
 def _structural_nodes(

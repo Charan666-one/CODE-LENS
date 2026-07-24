@@ -1,24 +1,28 @@
-"""JavaScript emitter — the second language, same schema (CP: JS support).
+"""JavaScript/TypeScript emitter — same schema for both (CP: JS + TS support).
 
 The architectural promise being kept here (ARCHITECTURE.md §2): "each new
-language is a new emitter into the *same* schema — the schema never changes
-per language." This module emits the same FileFacts the Python emitter does,
-and the same resolution pass turns them into edges. Nothing downstream —
-store, queries, viewspec, semantic layer — knows a second language exists.
+language is a new emitter into the *same* schema." TypeScript proves it hard:
+its grammar is a superset of JavaScript's, so the *same* walker serves both —
+only the tree-sitter grammar and the reported language name are injected
+(see `app.parser.__init__`). This module emits the same FileFacts the Python
+emitter does; the same resolution pass turns them into edges. Nothing
+downstream knows a third language exists.
 
 Coverage, stated honestly:
 * ESM imports (named, default, namespace, aliased) and CommonJS
-  `require('./x')` bindings — **relative specifiers only**. Bare specifiers
-  (`react`, `lodash`) are external packages: Layer B's business, never a
-  fact edge, and deliberately not bound so a repo file named `react.js`
-  can't be mistaken for the npm package.
+  `require('./x')` bindings. Relative specifiers *and* tsconfig path aliases
+  (`@/components/Navbar`) resolve; bare specifiers (`react`, `lodash`) are
+  external packages — never a fact edge.
 * Functions: declarations, arrow/function expressions assigned to a
   variable, and class methods. Classes with `extends`.
 * `this.method()` and `super.method()` normalise to the same self/super
   resolution the Python side uses.
 * `if (require.main === module)` is Node's `__main__` guard: entrypoint.
-* TypeScript is NOT parsed yet — it needs the separate tree-sitter-typescript
-  grammar. Saying so beats half-parsing it.
+* TypeScript type-only constructs (interfaces, type aliases, annotations)
+  have no runtime nodes and simply produce nothing — correct, not missing.
+* JSX composition (`<Component/>`) is not a function call and is not modelled
+  as an edge yet, so React apps show structure and imports but few CALLS —
+  honest for that framework's model.
 """
 
 from __future__ import annotations
@@ -40,7 +44,10 @@ _LANGUAGE = Language(tree_sitter_javascript.language())
 #: Callee shapes we interpret; anything fancier stays unresolved, not guessed.
 _DOTTED_NAME = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*$")
 
-_JS_EXTENSIONS = (".js", ".jsx", ".mjs", ".cjs")
+#: Relative-import extensions to strip. TypeScript imports usually omit the
+#: extension entirely (`from './util'`), which needs no stripping; these cover
+#: the explicit-extension cases in both ecosystems.
+_JS_EXTENSIONS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx")
 
 #: Decision points for the cyclomatic approximation (the lizard-style count):
 #: branches, loops, case arms, catches, short-circuits, ternaries.
@@ -55,6 +62,24 @@ def js_module_qname(path: str) -> str:
     parts = list(pure.parts)
     parts[-1] = pure.stem
     return ".".join(parts)
+
+
+def resolve_alias(specifier: str, aliases: dict[str, str]) -> str | None:
+    """Resolve a tsconfig path alias to a repo-relative module qname.
+
+    Next.js and most TS apps import their own code through aliases like
+    `@/components/Navbar`, mapped in tsconfig `compilerOptions.paths`. Without
+    this they look external and the app's real wiring is invisible. `aliases`
+    maps an alias prefix ("@/") to a dotted module prefix ("src."); the longest
+    matching prefix wins.
+    """
+    for prefix in sorted(aliases, key=len, reverse=True):
+        if specifier.startswith(prefix):
+            rest = specifier[len(prefix) :].replace("/", ".")
+            base = aliases[prefix]
+            combined = f"{base}{rest}" if base else rest
+            return combined.strip(".") or None
+    return None
 
 
 def _resolve_relative(specifier: str, importing_path: str) -> str | None:
@@ -90,10 +115,25 @@ class _Context:
 
 
 class JsEmitter:
-    """Walks one JavaScript file and records what it asserts."""
+    """Walks one JavaScript/TypeScript file and records what it asserts.
 
-    def __init__(self) -> None:
-        self._parser = Parser(_LANGUAGE)
+    TypeScript's grammar is a superset of JavaScript's — the same node types
+    (imports, functions, classes, calls) with type annotations layered on — so
+    one walker serves both. The grammar and the reported language name are
+    injected: `.js/.jsx/.mjs/.cjs` use tree-sitter-javascript, `.ts` and `.tsx`
+    use tree-sitter-typescript. Type-only constructs (interfaces, type aliases)
+    have no runtime nodes and simply produce nothing.
+    """
+
+    def __init__(
+        self,
+        language: Language | None = None,
+        language_name: str = "JavaScript",
+        aliases: dict[str, str] | None = None,
+    ) -> None:
+        self._parser = Parser(language or _LANGUAGE)
+        self._language_name = language_name
+        self._aliases = aliases or {}
 
     def emit(self, path: str, source: bytes, content_hash: str, loc: int) -> FileFacts:
         module_qname = js_module_qname(path)
@@ -103,7 +143,7 @@ class JsEmitter:
             name=PurePosixPath(path).name,
             qualified_name=path,
             file_path=path,
-            language="JavaScript",
+            language=self._language_name,
             content_hash=content_hash,
             loc=loc,
         )
@@ -113,7 +153,7 @@ class JsEmitter:
             is_package=False,
             file_node=file_node,
         )
-        walker = _JsWalker(facts, source)
+        walker = _JsWalker(facts, source, self._language_name, self._aliases)
         tree = self._parser.parse(source)
         walker.visit(
             tree.root_node,
@@ -128,9 +168,17 @@ class JsEmitter:
 
 
 class _JsWalker:
-    def __init__(self, facts: FileFacts, source: bytes) -> None:
+    def __init__(
+        self,
+        facts: FileFacts,
+        source: bytes,
+        language_name: str = "JavaScript",
+        aliases: dict[str, str] | None = None,
+    ) -> None:
         self.facts = facts
         self.source = source
+        self.language_name = language_name
+        self.aliases = aliases or {}
         self._seen_ids: set[str] = set()
 
     # ── traversal ─────────────────────────────────────────────────────────
@@ -270,7 +318,7 @@ class _JsWalker:
                 file_path=self.facts.path,
                 start_line=start_line,
                 end_line=end_line,
-                language="JavaScript",
+                language=self.language_name,
                 content_hash=hashlib.sha256(snippet).hexdigest(),
                 loc=end_line - start_line + 1,
                 complexity=self._complexity(snippet),
@@ -319,7 +367,7 @@ class _JsWalker:
             file_path=self.facts.path,
             start_line=start_line,
             end_line=end_line,
-            language="JavaScript",
+            language=self.language_name,
             content_hash=hashlib.sha256(snippet).hexdigest(),
             loc=end_line - start_line + 1,
             complexity=self._complexity(snippet),
@@ -365,7 +413,7 @@ class _JsWalker:
                 file_path=self.facts.path,
                 start_line=start_line,
                 end_line=end_line,
-                language="JavaScript",
+                language=self.language_name,
                 content_hash=hashlib.sha256(snippet).hexdigest(),
                 loc=end_line - start_line + 1,
             )
@@ -409,7 +457,9 @@ class _JsWalker:
         if source_node is None or source_node.text is None:
             return
         specifier = source_node.text.decode("utf-8", errors="replace").strip("'\"")
-        target = _resolve_relative(specifier, self.facts.path)
+        target = _resolve_relative(specifier, self.facts.path) or resolve_alias(
+            specifier, self.aliases
+        )
         if target is None:
             return  # bare specifier: external package, Layer B's business
 
@@ -472,7 +522,9 @@ class _JsWalker:
                 break
         if specifier is None:
             return
-        target = _resolve_relative(specifier, self.facts.path)
+        target = _resolve_relative(specifier, self.facts.path) or resolve_alias(
+            specifier, self.aliases
+        )
         if target is None:
             return
 

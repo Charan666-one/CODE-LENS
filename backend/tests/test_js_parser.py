@@ -30,6 +30,96 @@ def calls(graph: KnowledgeGraph) -> dict[tuple[str, str], str]:
     }
 
 
+# ── TypeScript: same walker, superset grammar ─────────────────────────────
+
+
+def test_typescript_functions_and_types_resolve(tmp_path: Path) -> None:
+    """.ts files parse through the TS grammar; type annotations don't break
+    function/class/call extraction, and type-only constructs produce nothing."""
+    graph = build(
+        tmp_path,
+        {
+            "util.ts": "export function helper(n: number): number { return n + 1; }\n",
+            "main.ts": """
+            import { helper } from './util';
+
+            interface Config { size: number }
+            type Id = string;
+
+            export function run(cfg: Config): number {
+              return helper(cfg.size);
+            }
+            """,
+        },
+    )
+    node_ids = {n.id for n in graph.nodes}
+    assert "function:util.helper" in node_ids
+    assert "function:main.run" in node_ids
+    assert calls(graph)[("function:main.run", "function:util.helper")] == "resolved"
+    # interface/type produced no spurious nodes
+    assert not any("Config" in nid or "Id" in nid for nid in node_ids)
+    assert "TypeScript" in {n.language for n in graph.nodes if n.language}
+
+
+def test_tsx_components_parse_and_imports_resolve(tmp_path: Path) -> None:
+    """.tsx files (JSX) parse; a relative import becomes a real edge."""
+    graph = build(
+        tmp_path,
+        {
+            "Button.tsx": "export function Button() { return <button>x</button>; }\n",
+            "App.tsx": """
+            import { Button } from './Button';
+
+            export function App() {
+              return <div><Button /></div>;
+            }
+            """,
+        },
+    )
+    node_ids = {n.id for n in graph.nodes}
+    assert "function:Button.Button" in node_ids
+    assert "function:App.App" in node_ids
+    assert ("file:App.tsx", "file:Button.tsx") in {
+        (e.source_id, e.target_id) for e in graph.edges if e.kind is EdgeKind.IMPORTS
+    }
+
+
+def test_tsconfig_path_alias_becomes_a_real_import(tmp_path: Path) -> None:
+    """`@/lib/x` (a Next.js path alias) must resolve to the real file, not be
+    written off as an external package."""
+    (tmp_path / "tsconfig.json").write_text(
+        '{"compilerOptions": {"paths": {"@/*": ["./src/*"]}}}'
+    )
+    graph = build(
+        tmp_path,
+        {
+            "src/lib/api.ts": "export function fetchThing() { return 1; }\n",
+            "src/app/page.tsx": """
+            import { fetchThing } from '@/lib/api';
+
+            export function Page() { return fetchThing(); }
+            """,
+        },
+    )
+    imports = {(e.source_id, e.target_id) for e in graph.edges if e.kind is EdgeKind.IMPORTS}
+    assert ("file:src/app/page.tsx", "file:src/lib/api.ts") in imports
+    call = ("function:src.app.page.Page", "function:src.lib.api.fetchThing")
+    assert calls(graph)[call] == "resolved"
+
+
+def test_mixed_python_js_ts_share_one_graph(tmp_path: Path) -> None:
+    graph = build(
+        tmp_path,
+        {
+            "tool.py": "def helper():\n    return 1\n",
+            "web.js": "function handler() { return 2; }\n",
+            "app.ts": "export function serve(): number { return 3; }\n",
+        },
+    )
+    languages = {n.language for n in graph.nodes if n.kind.value == "function"}
+    assert languages == {"Python", "JavaScript", "TypeScript"}
+
+
 # ── CommonJS definition forms ─────────────────────────────────────────────
 
 

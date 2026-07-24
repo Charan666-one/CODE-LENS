@@ -93,7 +93,7 @@ class SymbolTable:
         # module named `store` (store.js) always wins over the alias.
         for f in facts:
             if f.module_qname.endswith(".index") and f.path.endswith(
-                ("index.js", "index.jsx", "index.mjs", "index.cjs")
+                ("index.js", "index.jsx", "index.mjs", "index.cjs", "index.ts", "index.tsx")
             ):
                 self.modules.setdefault(f.module_qname[: -len(".index")], f.path)
         self.file_ids: dict[str, str] = {f.path: f.file_node.id for f in facts}
