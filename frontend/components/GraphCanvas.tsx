@@ -11,6 +11,29 @@ import { useGraphStore } from "@/lib/store";
  *  the ViewSpec. This component's whole job: put them on a WebGL canvas,
  *  animate the reveal, dim the world in focus mode. It computes nothing.
  */
+/** A camera bounding box that frames the bulk of the graph, not its outliers.
+ *  Centre on the centroid; size to a high percentile of each axis's spread so
+ *  a couple of stray nodes don't shrink everything. Uses the same y-flip the
+ *  graph is built with, so the box matches what's on screen. */
+function massBBox(nodes: { x: number; y: number }[]): { x: [number, number]; y: [number, number] } {
+  const xs = nodes.map((n) => n.x);
+  const ys = nodes.map((n) => -n.y); // graph stores y flipped; match it
+  const cx = xs.reduce((a, b) => a + b, 0) / xs.length;
+  const cy = ys.reduce((a, b) => a + b, 0) / ys.length;
+
+  const percentile = (values: number[], centre: number, p: number): number => {
+    const spread = values.map((v) => Math.abs(v - centre)).sort((a, b) => a - b);
+    const idx = Math.min(spread.length - 1, Math.floor(p * (spread.length - 1)));
+    return Math.max(spread[idx], 1);
+  };
+
+  // 88th percentile keeps ~1-2 outliers out of the frame; ×1.25 adds margin.
+  const halfW = percentile(xs, cx, 0.88) * 1.25;
+  const halfH = percentile(ys, cy, 0.88) * 1.25;
+  const half = Math.max(halfW, halfH); // square box → no axis distortion
+  return { x: [cx - half, cx + half], y: [cy - half, cy + half] };
+}
+
 /** Impact color for the ripple: hot amber at distance 1, fading toward the
  *  wavefront so a dependent three hops away visibly matters less than a direct
  *  one. Fades via alpha over the dark canvas — the falloff IS the severity. */
@@ -97,9 +120,13 @@ export default function GraphCanvas() {
     });
 
     sigmaRef.current = sigma;
-    // Frame the whole city on load. Sigma's default camera doesn't fit custom
-    // coordinates to the viewport on its own, which left the graph small and
-    // low; refresh + reset centers the bounding box and fills the screen.
+    // Frame the MASS, not the bounding box. Sigma fits the camera to the full
+    // node extent, so a single far-flung file (a lone docs/example script)
+    // drags the dense districts off-centre and shrinks them. Instead we hand
+    // sigma a custom bbox built from the centroid and a robust radius that
+    // ignores outliers — the bulk fills the screen; a stray node just sits
+    // near the edge. Honest: no node is moved or hidden, only the camera frames.
+    sigma.setCustomBBox(massBBox(spec.nodes));
     sigma.refresh();
     sigma.getCamera().animatedReset({ duration: 0 });
     return () => {
