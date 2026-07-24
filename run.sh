@@ -81,5 +81,12 @@ $DEV_MODE && printf "\033[33m  (dev mode — for demos use ./run.sh without --de
 printf "  Ctrl+C to stop.\n\n"
 command -v open >/dev/null && open "$URL" 2>/dev/null || true
 
-# hold the terminal until interrupted; if either server dies, exit so the trap fires
-wait -n
+# Hold the terminal until Ctrl+C, or until a server dies — then the trap
+# cleans up. Written as a poll loop, not `wait -n`, because macOS still ships
+# bash 3.2 (from 2007), which has no `wait -n`.
+while true; do
+  for pid in "${PIDS[@]}"; do
+    kill -0 "$pid" 2>/dev/null || { say "a server exited — shutting down the other"; exit 1; }
+  done
+  sleep 2
+done
