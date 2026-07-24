@@ -41,7 +41,13 @@ stop_servers() {
 cleanup() { say "shutting down…"; stop_servers; }
 trap cleanup EXIT INT TERM
 
-# free the ports if a previous run left something behind
+# End any OTHER launcher still holding the ports — a stale ./run.sh from a
+# previous session keeps its own poll loop alive and will fight this one,
+# which looks like "backend did not come up". Never kill ourselves ($$).
+for other in $(pgrep -f "run.sh" 2>/dev/null || true); do
+  [ "$other" != "$$" ] && kill "$other" 2>/dev/null || true
+done
+# free the ports if a previous run left servers behind
 stop_servers
 sleep 1
 
