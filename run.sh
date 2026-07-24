@@ -29,20 +29,20 @@ command -v npm >/dev/null || die "npm not found — install Node.js"
 [[ -d "$FRONTEND/node_modules" ]] || { say "installing frontend deps (first run)…"; (cd "$FRONTEND" && npm install); }
 
 PIDS=()
-cleanup() {
-  say "shutting down…"
+stop_servers() {
   for pid in "${PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done
-  # belt and suspenders: our two servers by name
+  # By name too: `next start` detaches next-server as an orphan the PID above
+  # never sees, so it must be named explicitly or the port 3000 leaks.
   pkill -f "uvicorn app.main:app" 2>/dev/null || true
   pkill -f "next start" 2>/dev/null || true
+  pkill -f "next-server" 2>/dev/null || true
   pkill -f "next dev" 2>/dev/null || true
 }
+cleanup() { say "shutting down…"; stop_servers; }
 trap cleanup EXIT INT TERM
 
 # free the ports if a previous run left something behind
-pkill -f "uvicorn app.main:app" 2>/dev/null || true
-pkill -f "next start" 2>/dev/null || true
-pkill -f "next dev" 2>/dev/null || true
+stop_servers
 sleep 1
 
 # ── backend ────────────────────────────────────────────────────────────────
@@ -84,9 +84,15 @@ command -v open >/dev/null && open "$URL" 2>/dev/null || true
 # Hold the terminal until Ctrl+C, or until a server dies — then the trap
 # cleans up. Written as a poll loop, not `wait -n`, because macOS still ships
 # bash 3.2 (from 2007), which has no `wait -n`.
+# Hold until Ctrl+C, or until a server stops *responding*. We poll the HTTP
+# endpoints, NOT the launch PIDs: `npm run start` spawns next-server and then
+# the wrapper process exits, so a live PID check reports a false death while
+# the site is happily serving. The service answering is the only truth that
+# matters. (bash 3.2 compatible — no `wait -n`.)
 while true; do
-  for pid in "${PIDS[@]}"; do
-    kill -0 "$pid" 2>/dev/null || { say "a server exited — shutting down the other"; exit 1; }
-  done
-  sleep 2
+  curl -fsS "http://127.0.0.1:$API_PORT/health" >/dev/null 2>&1 \
+    || { say "backend stopped responding — shutting down"; exit 1; }
+  curl -fsS "http://127.0.0.1:$WEB_PORT" >/dev/null 2>&1 \
+    || { say "frontend stopped responding — shutting down"; exit 1; }
+  sleep 3
 done
