@@ -1,8 +1,8 @@
 "use client";
 
 import { create } from "zustand";
-import { analyzeRepo, fetchViewSpec } from "./api";
-import type { PipelineStage, ViewSpec } from "./types";
+import { analyzeRepo, fetchBlastRadius, fetchViewSpec } from "./api";
+import type { BlastResult, PipelineStage, ViewSpec } from "./types";
 
 /** The Graph State Manager (ARCHITECTURE.md: the game-engine model).
  *
@@ -36,6 +36,13 @@ interface GraphState {
 
   selectedId: string | null;
 
+  /** The ripple: blast radius felt as an expanding wave. `rippleFront` is the
+   *  distance the wave has reached; a node lights when its distance <= front. */
+  blast: BlastResult | null;
+  rippleFor: string | null;
+  rippleFront: number;
+  maxRippleDistance: number;
+
   analyze: (source: string) => Promise<void>;
   setZoom: (zoom: number) => Promise<void>;
   advanceStage: () => void;
@@ -43,6 +50,9 @@ interface GraphState {
   advanceReveal: () => void;
   skipReveal: () => void; // every animation interruptible (EXPERIENCE)
   select: (id: string | null) => void;
+  showRipple: (nodeId: string) => Promise<void>;
+  advanceRipple: () => void;
+  clearRipple: () => void;
 }
 
 export const useGraphStore = create<GraphState>((set, get) => ({
@@ -57,6 +67,10 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   revealIndex: -1,
   maxAssemblyIndex: 0,
   selectedId: null,
+  blast: null,
+  rippleFor: null,
+  rippleFront: 0,
+  maxRippleDistance: 0,
 
   analyze: async (source: string) => {
     set({ phase: "understanding", error: null, stages: [], stagesShown: 0, spec: null });
@@ -72,6 +86,8 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         maxAssemblyIndex: maxAssembly,
         revealIndex: -1,
         selectedId: null,
+        blast: null,
+        rippleFor: null,
       });
       // The overlay now replays the real stages; it calls beginReveal() when
       // the last line has landed.
@@ -90,6 +106,10 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       // Zoom switches are instant: the reveal belongs to the first arrival.
       revealIndex: Math.max(0, ...spec.nodes.map((n) => n.assembly_index)),
       maxAssemblyIndex: Math.max(0, ...spec.nodes.map((n) => n.assembly_index)),
+      // A ripple is tied to one zoom's node ids; drop it on a level change.
+      blast: null,
+      rippleFor: null,
+      selectedId: null,
     });
   },
 
@@ -109,5 +129,31 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   skipReveal: () =>
     set((s) => ({ phase: "exploring", revealIndex: s.maxAssemblyIndex })),
 
-  select: (id) => set({ selectedId: id }),
+  // Selecting a different node ends any ripple in progress.
+  select: (id) => set({ selectedId: id, blast: null, rippleFor: null }),
+
+  showRipple: async (nodeId: string) => {
+    const { snapshotId } = get();
+    if (snapshotId === null) return;
+    const blast = await fetchBlastRadius(snapshotId, nodeId);
+    const maxDistance = Math.max(
+      1,
+      ...blast.ranked.map((entry) => entry.reasons.distance),
+    );
+    set({
+      blast,
+      rippleFor: nodeId,
+      selectedId: nodeId,
+      rippleFront: 0, // the wave starts at the source and expands outward
+      maxRippleDistance: maxDistance,
+    });
+  },
+
+  advanceRipple: () => {
+    const { rippleFront, maxRippleDistance } = get();
+    if (rippleFront >= maxRippleDistance) return; // wave has reached the edge
+    set({ rippleFront: rippleFront + 1 });
+  },
+
+  clearRipple: () => set({ blast: null, rippleFor: null, rippleFront: 0 }),
 }));

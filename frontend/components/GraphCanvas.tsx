@@ -11,6 +11,17 @@ import { useGraphStore } from "@/lib/store";
  *  the ViewSpec. This component's whole job: put them on a WebGL canvas,
  *  animate the reveal, dim the world in focus mode. It computes nothing.
  */
+/** Impact color for the ripple: hot amber at distance 1, fading toward the
+ *  wavefront so a dependent three hops away visibly matters less than a direct
+ *  one. Fades via alpha over the dark canvas — the falloff IS the severity. */
+function rippleColor(distance: number, front: number): string {
+  const span = Math.max(1, front);
+  const t = Math.min(1, (distance - 1) / span); // 0 nearest, 1 at the wavefront
+  const alpha = 1 - 0.7 * t;
+  const green = Math.round(160 - 60 * t);
+  return `rgba(249, ${green}, 40, ${alpha.toFixed(2)})`;
+}
+
 export default function GraphCanvas() {
   const containerRef = useRef<HTMLDivElement>(null);
   const sigmaRef = useRef<Sigma | null>(null);
@@ -22,6 +33,11 @@ export default function GraphCanvas() {
   const select = useGraphStore((s) => s.select);
   const advanceReveal = useGraphStore((s) => s.advanceReveal);
   const skipReveal = useGraphStore((s) => s.skipReveal);
+  const blast = useGraphStore((s) => s.blast);
+  const rippleFor = useGraphStore((s) => s.rippleFor);
+  const rippleFront = useGraphStore((s) => s.rippleFront);
+  const advanceRipple = useGraphStore((s) => s.advanceRipple);
+  const clearRipple = useGraphStore((s) => s.clearRipple);
 
   // Build/rebuild the sigma instance when a new spec arrives.
   useEffect(() => {
@@ -76,6 +92,7 @@ export default function GraphCanvas() {
     sigma.on("clickStage", () => {
       const state = useGraphStore.getState();
       if (state.phase === "revealing") state.skipReveal();
+      else if (state.rippleFor) state.clearRipple();
       else state.select(null);
     });
 
@@ -91,14 +108,27 @@ export default function GraphCanvas() {
     };
   }, [spec]);
 
-  // The assembly reveal + focus dimming are reducers over precomputed state.
+  // The reveal, the ripple, and focus dimming are all reducers over
+  // precomputed state — the renderer decides nothing, it only choreographs.
   useEffect(() => {
     const sigma = sigmaRef.current;
     if (!sigma) return;
     const graph = sigma.getGraph();
 
+    // Ripple: distance-per-node from the real blast-radius result, kept only
+    // for nodes that exist at this zoom level (the wave lights what's on screen).
+    const distanceOf = new Map<string, number>();
+    if (rippleFor && blast) {
+      for (const entry of blast.ranked) {
+        if (graph.hasNode(entry.node_id)) {
+          distanceOf.set(entry.node_id, entry.reasons.distance);
+        }
+      }
+    }
+    const rippleActive = rippleFor !== null && graph.hasNode(rippleFor);
+
     const neighbourhood = new Set<string>();
-    if (selectedId && graph.hasNode(selectedId)) {
+    if (!rippleActive && selectedId && graph.hasNode(selectedId)) {
       neighbourhood.add(selectedId);
       for (const neighbour of graph.neighbors(selectedId)) neighbourhood.add(neighbour);
     }
@@ -108,6 +138,28 @@ export default function GraphCanvas() {
       if (phase === "revealing" && assemblyIndex > revealIndex) {
         return { ...data, hidden: true };
       }
+
+      if (rippleActive) {
+        if (node === rippleFor) {
+          // The source of the change: the eye of the storm.
+          return { ...data, color: "#f8fafc", size: (data.size as number) * 1.6, zIndex: 3 };
+        }
+        const distance = distanceOf.get(node);
+        if (distance === undefined) {
+          return { ...data, color: "#0f172a", label: null, zIndex: 0 }; // untouched
+        }
+        if (distance > rippleFront) {
+          return { ...data, color: "#1e293b", label: null, zIndex: 1 }; // wave not here yet
+        }
+        // Reached: hot near the source, fading with distance (real severity).
+        return {
+          ...data,
+          color: rippleColor(distance, rippleFront),
+          size: (data.size as number) * (distance === 1 ? 1.4 : 1.1),
+          zIndex: distance === 1 ? 2 : 1,
+        };
+      }
+
       if (selectedId && !neighbourhood.has(node)) {
         // Focus mode: the rest of the city recedes (EXPERIENCE §signature).
         return { ...data, color: "#1e293b", label: null, zIndex: 0 };
@@ -119,16 +171,26 @@ export default function GraphCanvas() {
     });
 
     sigma.setSetting("edgeReducer", (edge, data) => {
+      const [source, target] = graph.extremities(edge);
+
       if (phase === "revealing") {
-        const [source, target] = graph.extremities(edge);
         const sourceIn =
           (graph.getNodeAttribute(source, "assemblyIndex") as number) <= revealIndex;
         const targetIn =
           (graph.getNodeAttribute(target, "assemblyIndex") as number) <= revealIndex;
         if (!sourceIn || !targetIn) return { ...data, hidden: true };
       }
+
+      if (rippleActive) {
+        const sourceReached =
+          source === rippleFor || (distanceOf.get(source) ?? Infinity) <= rippleFront;
+        const targetReached =
+          target === rippleFor || (distanceOf.get(target) ?? Infinity) <= rippleFront;
+        if (!sourceReached || !targetReached) return { ...data, hidden: true };
+        return { ...data, color: "rgba(251,146,60,0.5)", size: (data.size as number) * 1.4 };
+      }
+
       if (selectedId) {
-        const [source, target] = graph.extremities(edge);
         if (!neighbourhood.has(source) || !neighbourhood.has(target)) {
           return { ...data, hidden: true };
         }
@@ -138,7 +200,14 @@ export default function GraphCanvas() {
     });
 
     sigma.refresh();
-  }, [phase, revealIndex, selectedId]);
+  }, [phase, revealIndex, selectedId, rippleFor, blast, rippleFront]);
+
+  // Drive the ripple clock: the wave expands one distance ring at a time.
+  useEffect(() => {
+    if (!rippleFor) return;
+    const timer = window.setInterval(advanceRipple, 320);
+    return () => window.clearInterval(timer);
+  }, [rippleFor, advanceRipple]);
 
   // Drive the reveal clock.
   useEffect(() => {
@@ -151,13 +220,15 @@ export default function GraphCanvas() {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        if (useGraphStore.getState().phase === "revealing") skipReveal();
+        const state = useGraphStore.getState();
+        if (state.phase === "revealing") skipReveal();
+        else if (state.rippleFor) clearRipple();
         else select(null);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [skipReveal, select]);
+  }, [skipReveal, select, clearRipple]);
 
   return <div ref={containerRef} className="graph-canvas" />;
 }

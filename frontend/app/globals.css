@@ -268,3 +268,56 @@ body {
   font-size: 0.72rem;
   color: var(--muted);
 }
+
+/* ── the ripple (blast radius) ───────────────────────────────────────── */
+
+.ripple-trigger {
+  margin-top: 0.4rem;
+  width: 100%;
+  padding: 0.6rem 0.8rem;
+  border-radius: 10px;
+  border: 1px solid rgba(249, 146, 40, 0.35);
+  background: rgba(249, 146, 40, 0.08);
+  color: #fdba74;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.ripple-trigger:hover {
+  background: rgba(249, 146, 40, 0.16);
+}
+
+.ripple-readout {
+  margin-top: 0.6rem;
+  border-top: 1px solid var(--line);
+  padding-top: 0.7rem;
+}
+
+.ripple-count {
+  font-size: 0.9rem;
+  color: #fdba74;
+  margin-bottom: 0.4rem;
+}
+
+.ripple-count strong {
+  font-size: 1.15rem;
+  color: #fb923c;
+}
+
+.ripple-clear {
+  margin-top: 0.6rem;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.ripple-clear:hover {
+  color: var(--text);
+  border-color: rgba(148, 163, 184, 0.4);
+}

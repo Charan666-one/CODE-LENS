@@ -61,3 +61,22 @@ export interface AnalyzeResponse {
   nodes: number;
   edges: number;
 }
+
+export interface RankedNode {
+  node_id: string;
+  score: number;
+  reasons: {
+    distance: number;
+    fan_in: number;
+    path_confidence: "resolved" | "heuristic" | "dynamic_unknown";
+  };
+}
+
+/** The blast_radius ResultGraph — the facts the ripple animates. */
+export interface BlastResult {
+  focus_id: string;
+  node_ids: string[];
+  ranked: RankedNode[];
+  paths: Record<string, string[]>;
+  meta: { total_affected: number };
+}

@@ -11,10 +11,15 @@ export default function HUD() {
   const spec = useGraphStore((s) => s.spec);
   const selectedId = useGraphStore((s) => s.selectedId);
   const repoUrl = useGraphStore((s) => s.repoUrl);
+  const blast = useGraphStore((s) => s.blast);
+  const rippleFor = useGraphStore((s) => s.rippleFor);
+  const showRipple = useGraphStore((s) => s.showRipple);
+  const clearRipple = useGraphStore((s) => s.clearRipple);
 
   if (phase !== "exploring" && phase !== "revealing") return null;
 
   const selected = spec?.nodes.find((node) => node.id === selectedId) ?? null;
+  const rippleActive = rippleFor !== null && blast !== null;
 
   return (
     <>
@@ -61,7 +66,25 @@ export default function HUD() {
               {selected.start_line ? `:${selected.start_line}` : ""}
             </p>
           )}
-          <p className="node-hint">Lit nodes are its direct world. Esc to release.</p>
+
+          {rippleActive ? (
+            <div className="ripple-readout">
+              <p className="ripple-count">
+                <strong>{blast.meta.total_affected}</strong> modules break if you
+                change this
+              </p>
+              <p className="node-hint">
+                The wave is the real blast radius — fading with distance. Esc to release.
+              </p>
+              <button className="ripple-clear" onClick={clearRipple}>
+                Clear ripple
+              </button>
+            </div>
+          ) : (
+            <button className="ripple-trigger" onClick={() => showRipple(selected.id)}>
+              ⟿ What breaks if I change this?
+            </button>
+          )}
         </aside>
       )}
     </>

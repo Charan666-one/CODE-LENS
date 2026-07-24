@@ -1,4 +1,4 @@
-import type { AnalyzeResponse, ViewSpec } from "./types";
+import type { AnalyzeResponse, BlastResult, ViewSpec } from "./types";
 
 /** Thin fetchers. Components never call fetch directly — they read the
  *  store, and the store calls these. */
@@ -35,6 +35,21 @@ export async function fetchViewSpec(
   const response = await expectOk(
     await fetch(`/api/repos/${snapshotId}/viewspec?zoom=${zoom}`, {
       cache: "no-store",
+    }),
+  );
+  return response.json();
+}
+
+export async function fetchBlastRadius(
+  snapshotId: number,
+  nodeId: string,
+): Promise<BlastResult> {
+  const response = await expectOk(
+    await fetch(`/api/repos/${snapshotId}/query/blast_radius`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      body: JSON.stringify({ params: { node_id: nodeId } }),
     }),
   );
   return response.json();
