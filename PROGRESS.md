@@ -9,17 +9,18 @@
 
 ---
 
-## The numbers, as of July 23, 2026
+## The numbers, as of July 24, 2026
 
 | Metric | Value |
 |---|---|
-| Commits | 16 (every one a gated checkpoint or its docs) |
+| Commits | 22 (every one a gated checkpoint or its docs) |
 | Application code | ~5,400 lines (`backend/app/`) |
 | Test code | ~2,600 lines, **199 tests passing**, ruff + mypy clean |
-| Frontend | ~1,000 lines TypeScript (parked, compiles) |
+| Frontend | ~1,200 lines TypeScript, **verified live in a browser** |
 | Languages parsed | Python + JavaScript, one shared schema |
 | LLM tokens spent | **$0** — every AI path tested via a counting fake |
-| Roadmap position | Stages 0–3 complete · Stage 4 compiler+API done, renderer parked |
+| Roadmap position | **Stages 0–4 complete.** Stage 5 (validation) is a human gate — kit ready, awaiting real users |
+| Startup level | **Pre-validation.** 0 users, 0 revenue — by design; CP-5.1 not yet run |
 
 ---
 
@@ -85,11 +86,31 @@
 
 **How it helps:** Doubles the addressable market to the JS/TS ecosystem FOUNDATION always specified, and *proves the platform claim*: a second language changed one dispatch statement and zero downstream systems. The express stress test exposed why parsing idioms matters commercially — before assignment support, express's actual API (`lib/response.js`) parsed to zero functions; blast radius on the most popular Node framework would have been silently empty. After: 168 functions, 379 labeled edges, 6/6 spot checks. Python regression-verified byte-identical.
 
+### 13 · `f1fc844` — RUNBOOK.md, verified commands *(Jul 23)*
+**What changed:** A command reference where every command was executed against a real repo (`pallets/click`) before being written — outputs are real, not illustrative.
+
+**How it helps:** Removes the "how do I even run this" friction for the next person (including future-you). A tool nobody can start gets used by nobody.
+
+### 14 · `21a3a8c` — The ripple, blast radius as a wave *(Jul 23)*
+**What changed:** The signature interaction (EXPERIENCE.md), verified live: select a node, ask "what breaks if I change this?", and a wave expands through every transitive dependent, intensity fading with distance. Honest theater end to end — the wave *is* the real `blast_radius` result; colour falloff is actual severity.
+
+**How it helps:** This is the difference between *"nice graph tool"* and *"wait — what is this?"* Blast radius is what CodeLens sells; the ripple makes people *feel* it before they read it. Per strategy, the map is the distribution engine — the screenshot that spreads is marketing you don't pay for. Verified: `models.py`'s 11 dependents lit in the wave, the rest of the city receded.
+
+### 15 · `4059cdf` — Layout polish: frame the mass, not the outliers *(Jul 24)*
+**What changed:** Sigma fit the camera to the full node extent, so one far-flung file dragged the dense districts into a corner (the tiny-blob framing). Fix: a custom bounding box from the centroid + a robust 88th-percentile radius, so the bulk fills the screen and a stray node just sits at the edge. No node moved or hidden — only the camera reframes.
+
+**How it helps:** Completes Stage 4 — the hero moment now *lands*. Verified live on `pallets/click` (the worst lopsided case): a centred star-map instead of a corner blob, with focus mode and the ripple confirmed still working.
+
+### 16 · Stage 5 kit — the validation instrument *(Jul 24)*
+**What changed:** `run.sh` (one command: builds the frontend, starts both servers, opens the browser, cleans up on Ctrl+C — verified end to end) and `VALIDATION.md` (the CP-5.1 kit: ICP targeting, the interview-the-pain script, the 10-second silent test, a per-conversation scorecard, and the honest ≥5-of-20-pull decision rule).
+
+**How it helps:** Stage 5 is the only checkpoint no code can pass — it needs ~20 real developers on their own repos. This turns "go validate somehow" into a runnable process: zero-friction demo + a disciplined way to record whether people actually *pull*, so the continue-or-pivot decision rests on honest data instead of wishful politeness. It is the difference between validating and hoping.
+
 ---
 
 ## What this adds up to
 
-Strategy said the moat is: **graph → validated predictions → trust, compounding with time**. The record above is that machine being assembled in order: the graph exists and is provably correct (M1) · the wedge query is deterministic and checkable (Stage 2) · AI explains without inventing, at near-zero marginal cost (Stage 3) · everything is reachable over HTTP in two languages (Stage 4a). What remains before users: the hero-moment frontend (parked, by choice, for last) — then CP-5.1, the only gate that matters.
+Strategy said the moat is: **graph → validated predictions → trust, compounding with time**. The record above is that machine being assembled in order: the graph exists and is provably correct (M1) · the wedge query is deterministic and checkable (Stage 2) · AI explains without inventing, at near-zero marginal cost (Stage 3) · the hero moment is built and verified live, ripple and all (Stage 4). **The build is now ahead of the business** — every engineering checkpoint through Stage 4 is done, and the next line is not code. Stage 5 (CP-5.1) is a human gate: real developers, their own repos, the unprompted *"I'd use this again."* The kit to run it is ready; the gate itself is walked by users, not by the build. Until it passes, Stages 6–9 stay closed — deliberately.
 
 ---
 
