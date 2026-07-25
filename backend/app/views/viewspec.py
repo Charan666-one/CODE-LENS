@@ -39,6 +39,24 @@ _CONFIDENCE_ORDER = [
 _ACCENT_ENTRYPOINT = "#34d399"  # where execution starts: the green doors
 _CLUSTER_COLOR = "#1e293b"
 
+#: Above this many files, thin the PICTURE — not the graph. EXPERIENCE.md's
+#: non-negotiables are "60fps or reduce detail" and "nobody is ever
+#: overwhelmed"; a monorepo like n8n (18,767 parseable files) would otherwise
+#: hand WebGL an unrenderable node count. Queries (blast radius, risk,
+#: centrality...) always run against the full graph regardless — this cap is
+#: presentation-only, the same split ARCHITECTURE.md draws between the
+#: renderer and the truth it renders.
+_MAX_RENDERED_FILES = 600
+
+
+def _cap_by_fan_in(files: list[Node], view: GraphView, cap: int) -> list[Node]:
+    """Keep the `cap` most-connected files — the hubs a person would look for
+    first — dropping leaves. Deterministic: ties broken by id."""
+    if len(files) <= cap:
+        return files
+    ranked = sorted(files, key=lambda f: (-view.fan_in(f.id, DEPENDENCY_KINDS), f.id))
+    return ranked[:cap]
+
 
 class ViewNode(BaseModel):
     id: str
@@ -222,6 +240,10 @@ def _street_view(
     include_members: bool,
 ) -> ViewSpec:
     """Files laid out inside their districts; L3 adds classes and functions."""
+    total_files = len(files)
+    files = _cap_by_fan_in(files, view, _MAX_RENDERED_FILES)
+    truncated = len(files) < total_files
+
     members: dict[str, list[Node]] = {}
     for file in files:
         members.setdefault(cluster_of[file.id], []).append(file)
@@ -289,7 +311,11 @@ def _street_view(
         nodes=nodes,
         edges=edges,
         clusters=clusters,
-        meta={"files": len(files), "rendered_nodes": len(nodes)},
+        meta={
+            "files": total_files,
+            "rendered_nodes": len(nodes),
+            "truncated": truncated,
+        },
     )
 
 

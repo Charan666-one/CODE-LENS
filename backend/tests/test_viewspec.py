@@ -11,12 +11,63 @@ from pathlib import Path
 
 import pytest
 
-from app.graph.schema import KnowledgeGraph
+from app.graph.schema import EdgeKind, KnowledgeGraph, Node, NodeKind, RepoSnapshot
 from app.parser import parse_repository
-from app.views.viewspec import compile_viewspec
+from app.views.viewspec import _MAX_RENDERED_FILES, compile_viewspec
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 TINY_PYTHON = BACKEND_DIR / "fixtures" / "tiny_python" / "repo"
+
+
+def _huge_repo(hub_count: int, leaf_count: int) -> KnowledgeGraph:
+    """A synthetic repo bigger than the render cap, with a known fan-in
+    ranking: `hub_count` hubs (each imported by every leaf) must always
+    survive a cap; the leaves are otherwise identical, so which ones survive
+    is decided purely by the tie-break — a fact this test also pins down."""
+    from app.graph.schema import Edge
+
+    nodes: list[Node] = []
+    edges: list[Edge] = []
+    for i in range(hub_count):
+        name = f"hub_{i:02d}.py"
+        path = f"src/{name}"
+        nodes.append(
+            Node(
+                id=f"file:{path}",
+                kind=NodeKind.FILE,
+                name=name,
+                qualified_name=path,
+                file_path=path,
+            )
+        )
+    for i in range(leaf_count):
+        name = f"leaf_{i:03d}.py"
+        path = f"src/{name}"
+        nodes.append(
+            Node(
+                id=f"file:{path}",
+                kind=NodeKind.FILE,
+                name=name,
+                qualified_name=path,
+                file_path=path,
+            )
+        )
+        edges.append(
+            Edge(
+                source_id=f"file:src/leaf_{i:03d}.py",
+                target_id=f"file:src/hub_{i % hub_count:02d}.py",
+                kind=EdgeKind.IMPORTS,
+            )
+        )
+    snapshot = RepoSnapshot(
+        repo_url="https://example.test/huge/repo",
+        commit_sha="0" * 40,
+        primary_language="Python",
+        languages={"py": len(nodes)},
+        file_count=len(nodes),
+        analyzed_at="2026-01-01T00:00:00+00:00",
+    )
+    return KnowledgeGraph(snapshot=snapshot, nodes=nodes, edges=edges)
 
 
 @pytest.fixture(scope="module")
@@ -98,8 +149,7 @@ def test_l2_lifts_function_calls_to_file_relationships(
         assert edge.target in node_ids
     # shapes.py's method calls into calculator.py: lifted edge must exist.
     lifted = [
-        e for e in spec.edges
-        if e.source == "file:shapes.py" and e.target == "file:calculator.py"
+        e for e in spec.edges if e.source == "file:shapes.py" and e.target == "file:calculator.py"
     ]
     assert lifted, "cross-file dependency must survive the lift"
 
@@ -160,3 +210,66 @@ def test_view_nodes_are_clickable_to_code(codelens_graph: KnowledgeGraph) -> Non
 def test_spec_serialises_for_the_wire(tiny_graph: KnowledgeGraph) -> None:
     payload = compile_viewspec(tiny_graph, zoom=2).model_dump_json()
     assert '"zoom":2' in payload
+
+
+# ── the render cap: huge monorepos must stay on-screen ────────────────────
+# n8n (18,767 parseable files) produced an 18,767-node zoom-2 view before
+# this cap existed — unrenderable, and a direct violation of EXPERIENCE.md's
+# "60fps or reduce detail" / "nobody is ever overwhelmed" non-negotiables.
+
+
+def test_small_graphs_are_never_truncated(codelens_graph: KnowledgeGraph) -> None:
+    spec = compile_viewspec(codelens_graph, zoom=2)
+    assert spec.meta["truncated"] is False
+    assert spec.meta["files"] == spec.meta["rendered_nodes"]
+
+
+def test_huge_repo_is_capped_to_the_render_limit() -> None:
+    hubs, leaves = 10, _MAX_RENDERED_FILES + 5  # comfortably over the cap
+    graph = _huge_repo(hub_count=hubs, leaf_count=leaves)
+    total_files = hubs + leaves
+    assert total_files > _MAX_RENDERED_FILES  # the case under test
+
+    spec = compile_viewspec(graph, zoom=2)
+
+    assert len(spec.nodes) == _MAX_RENDERED_FILES
+    assert spec.meta == {
+        "files": total_files,
+        "rendered_nodes": _MAX_RENDERED_FILES,
+        "truncated": True,
+    }
+
+
+def test_render_cap_keeps_the_hubs_and_the_lowest_id_leaves() -> None:
+    """Deterministic tie-break, pinned exactly: hubs (fan-in 60) always beat
+    leaves (fan-in 0); among equal-fan-in leaves, lower id wins the tie."""
+    hubs, leaves = 10, _MAX_RENDERED_FILES + 10  # 10 extra leaves must be cut
+    graph = _huge_repo(hub_count=hubs, leaf_count=leaves)
+    spec = compile_viewspec(graph, zoom=2)
+    kept = {node.id for node in spec.nodes}
+
+    for i in range(hubs):
+        assert f"file:src/hub_{i:02d}.py" in kept  # every hub survives
+
+    surviving_leaves = _MAX_RENDERED_FILES - hubs
+    for i in range(surviving_leaves):
+        assert f"file:src/leaf_{i:03d}.py" in kept  # lowest-id leaves kept
+    for i in range(surviving_leaves, leaves):
+        assert f"file:src/leaf_{i:03d}.py" not in kept  # highest-id leaves cut
+
+
+def test_render_cap_produces_no_dangling_edges() -> None:
+    graph = _huge_repo(hub_count=10, leaf_count=_MAX_RENDERED_FILES + 50)
+    spec = compile_viewspec(graph, zoom=2)
+    rendered = {node.id for node in spec.nodes}
+    for edge in spec.edges:
+        assert edge.source in rendered
+        assert edge.target in rendered
+
+
+def test_render_cap_applies_at_zoom_three_too() -> None:
+    graph = _huge_repo(hub_count=10, leaf_count=_MAX_RENDERED_FILES + 50)
+    spec = compile_viewspec(graph, zoom=3)
+    file_nodes = [n for n in spec.nodes if n.kind == "file"]
+    assert len(file_nodes) == _MAX_RENDERED_FILES
+    assert spec.meta["truncated"] is True
