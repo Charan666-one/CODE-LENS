@@ -124,7 +124,12 @@ def compile_viewspec(graph: KnowledgeGraph, *, zoom: int = 2) -> ViewSpec:
     view = GraphView(graph)
     files = [n for n in graph.nodes if n.kind is NodeKind.FILE]
 
-    cluster_of = _assign_clusters(files)
+    # Districts are split deep only for L1, where naming the real packages is
+    # the whole point. L2/L3 keep the coarse top-level grouping: they lay out
+    # every file, and 60+ tiny districts scatter the map into disconnected
+    # specks instead of the single dense "brain" that makes the street view
+    # readable (and screenshot-worthy — EXPERIENCE.md §the hero moment).
+    cluster_of = _assign_clusters(files, deep=zoom == 1)
     risk_of = _risk_per_file(view, files)
     assembly = _assembly_order(view, files)
 
@@ -441,7 +446,7 @@ def _cluster_key(file: Node, depth: int = 1) -> str:
     return "/".join(parts[: min(depth, len(parts) - 1)])
 
 
-def _assign_clusters(files: list[Node]) -> dict[str, str]:
+def _assign_clusters(files: list[Node], *, deep: bool = True) -> dict[str, str]:
     """Districts that stay meaningful on monorepos.
 
     A flat top-level split is useless where one directory holds nearly
@@ -451,8 +456,14 @@ def _assign_clusters(files: list[Node]) -> dict[str, str]:
     is therefore re-split one level deeper, repeatedly, until the districts
     are informative or the paths run out. Small repos are unaffected: nothing
     exceeds the share, so this is exactly the old depth-1 behaviour.
+
+    `deep=False` keeps the plain top-level split. The zoomed-in views want it:
+    they place every file, and many small districts fling the map apart into
+    specks rather than one legible mass.
     """
     assigned = {file.id: _cluster_key(file) for file in files}
+    if not deep:
+        return assigned
     by_id = {file.id: file for file in files}
     total = max(len(files), 1)
 

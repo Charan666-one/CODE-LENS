@@ -301,6 +301,47 @@ def test_monorepo_districts_split_deeper_instead_of_one_blob() -> None:
     assert labels == {"packages/cli", "packages/core", "packages/workflow"}
 
 
+def test_zoomed_views_keep_the_coarse_dense_layout() -> None:
+    """L1 names the real packages; L2/L3 must NOT inherit that deep split.
+    Placing every file across 60+ tiny districts flings the map into
+    disconnected specks instead of one legible mass — the deep split belongs
+    to the district view alone."""
+    from app.graph.schema import Edge
+
+    nodes = [
+        Node(
+            id=f"file:packages/{pkg}/src/mod_{i}.py",
+            kind=NodeKind.FILE,
+            name=f"mod_{i}.py",
+            qualified_name=f"packages/{pkg}/src/mod_{i}.py",
+            file_path=f"packages/{pkg}/src/mod_{i}.py",
+        )
+        for pkg in ("cli", "core", "workflow")
+        for i in range(20)
+    ]
+    snapshot = RepoSnapshot(
+        repo_url="https://example.test/mono/repo",
+        commit_sha="0" * 40,
+        primary_language="Python",
+        languages={"py": len(nodes)},
+        file_count=len(nodes),
+        analyzed_at="2026-01-01T00:00:00+00:00",
+    )
+    graph = KnowledgeGraph(snapshot=snapshot, nodes=nodes, edges=list[Edge]())
+
+    l1 = compile_viewspec(graph, zoom=1)
+    l2 = compile_viewspec(graph, zoom=2)
+
+    assert len(l1.nodes) == 3  # the three real packages
+    assert {c.id for c in l2.clusters} == {"packages"}  # one dense district
+
+    def span(spec: object) -> float:
+        xs = [n.x for n in spec.nodes]  # type: ignore[attr-defined]
+        return max(xs) - min(xs)
+
+    assert span(l2) < span(l1)  # zoomed-in stays compact, not flung apart
+
+
 def test_render_cap_applies_at_zoom_three_too() -> None:
     graph = _huge_repo(hub_count=10, leaf_count=_MAX_RENDERED_FILES + 50)
     spec = compile_viewspec(graph, zoom=3)
