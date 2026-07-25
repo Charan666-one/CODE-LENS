@@ -187,12 +187,31 @@ export default function GraphCanvas() {
         };
       }
 
-      if (selectedId && !neighbourhood.has(node)) {
-        // Focus mode: the rest of the city recedes (EXPERIENCE §signature).
-        return { ...data, color: "#1e293b", label: null, zIndex: 0 };
-      }
-      if (selectedId && node === selectedId) {
-        return { ...data, highlighted: true, zIndex: 2 };
+      if (selectedId) {
+        // Focus mode (EXPERIENCE §signature). On a dense graph a slightly
+        // dimmer neighbour is invisible — the selection has to be unmistakable
+        // at a glance, so: the city recedes to near-black, the selected node
+        // becomes a large bright marker with its label forced on, and its
+        // direct world keeps its real colour but is enlarged and labelled.
+        if (node === selectedId) {
+          return {
+            ...data,
+            color: "#ffffff",
+            size: Math.max((data.size as number) * 2.2, 12),
+            highlighted: true,
+            forceLabel: true,
+            zIndex: 3,
+          };
+        }
+        if (neighbourhood.has(node)) {
+          return {
+            ...data,
+            size: Math.max((data.size as number) * 1.5, 6),
+            forceLabel: true,
+            zIndex: 2,
+          };
+        }
+        return { ...data, color: "#111a2b", label: null, zIndex: 0 };
       }
       return { ...data, zIndex: 1 };
     });
@@ -221,7 +240,14 @@ export default function GraphCanvas() {
         if (!neighbourhood.has(source) || !neighbourhood.has(target)) {
           return { ...data, hidden: true };
         }
-        return { ...data, color: "rgba(125,211,252,0.6)", size: (data.size as number) * 1.5 };
+        // Edges touching the selection glow; the ones merely between two
+        // neighbours stay quieter, so the focus reads as a star, not a mesh.
+        const touchesSelection = source === selectedId || target === selectedId;
+        return {
+          ...data,
+          color: touchesSelection ? "rgba(125,211,252,0.95)" : "rgba(125,211,252,0.35)",
+          size: (data.size as number) * (touchesSelection ? 2.4 : 1.2),
+        };
       }
       return data;
     });

@@ -13,8 +13,11 @@ without either (ARCHITECTURE.md corollary 1).
 from __future__ import annotations
 
 import json
+import os
 import re
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import tree_sitter_typescript
 from tree_sitter import Language
@@ -49,24 +52,67 @@ def parse_repository(root: Path | str, *, max_size_mb: int | None = None) -> Kno
     return parse_ingested(ingested)
 
 
+#: Below this many files, a process pool costs more (spawn + IPC) than the
+#: parsing it parallelises. Above it, tree-sitter is CPU-bound and scales.
+_PARALLEL_THRESHOLD = 400
+
+
+def _build_emitters(aliases: dict[str, str]) -> dict[str, PythonEmitter | JsEmitter]:
+    """Per-language emitters. Rebuilt inside each worker process, because
+    tree-sitter Language handles cannot cross a process boundary."""
+    return {
+        **dict.fromkeys(_PYTHON_EXTENSIONS, PythonEmitter()),
+        **dict.fromkeys(_JS_EXTENSIONS, JsEmitter(aliases=aliases)),
+        "ts": JsEmitter(_TS_LANGUAGE, "TypeScript", aliases),
+        "tsx": JsEmitter(_TSX_LANGUAGE, "TypeScript", aliases),
+    }
+
+
+_WORKER_EMITTERS: dict[str, PythonEmitter | JsEmitter] = {}
+_WORKER_ROOT: Path | None = None
+
+
+def _worker_init(root: Path, aliases: dict[str, str]) -> None:
+    global _WORKER_ROOT
+    _WORKER_ROOT = root
+    _WORKER_EMITTERS.update(_build_emitters(aliases))
+
+
+def _worker_parse(job: tuple[str, str, str, int]) -> FileFacts | None:
+    """Parse one file inside a pool worker. Returns None for anything
+    unreadable — one bad file must never fail the repository."""
+    path, extension, content_hash, loc = job
+    emitter = _WORKER_EMITTERS.get(extension)
+    if emitter is None or _WORKER_ROOT is None:
+        return None
+    try:
+        source = (_WORKER_ROOT / path).read_bytes()
+    except OSError:
+        return None
+    return emitter.emit(path=path, source=source, content_hash=content_hash, loc=loc)
+
+
 def parse_ingested(ingested: IngestedRepo) -> KnowledgeGraph:
     """Parse an already-ingested repository into a KnowledgeGraph.
 
     One emitter per language, one schema for all of them: the dispatch below
     is the *entire* per-language surface of the pipeline.
+
+    Large repos parse across processes — tree-sitter is CPU-bound and a
+    monorepo is tens of thousands of files (n8n: ~19k, ~30s single-threaded).
+    Results are re-sorted by path afterwards, so the graph is byte-identical
+    to the sequential build regardless of how the work was scheduled
+    (Constitution 4: the same input always gives the same graph).
     """
     aliases = _read_path_aliases(ingested.root)
-    python_emitter = PythonEmitter()
-    js_emitter = JsEmitter(aliases=aliases)
-    ts_emitter = JsEmitter(_TS_LANGUAGE, "TypeScript", aliases)
-    tsx_emitter = JsEmitter(_TSX_LANGUAGE, "TypeScript", aliases)
-    by_extension = {
-        **dict.fromkeys(_PYTHON_EXTENSIONS, python_emitter),
-        **dict.fromkeys(_JS_EXTENSIONS, js_emitter),
-        "ts": ts_emitter,
-        "tsx": tsx_emitter,
-    }
+    by_extension = _build_emitters(aliases)
     facts: list[FileFacts] = []
+
+    parseable = [f for f in ingested.files if f.extension in by_extension]
+    if len(parseable) >= _PARALLEL_THRESHOLD:
+        parsed = _parse_in_parallel(ingested, parseable, aliases)
+        if parsed is not None:
+            return _assemble(ingested, parsed)
 
     for source_file in ingested.files:
         emitter = by_extension.get(source_file.extension)
@@ -85,11 +131,38 @@ def parse_ingested(ingested: IngestedRepo) -> KnowledgeGraph:
             )
         )
 
+    return _assemble(ingested, facts)
+
+
+def _assemble(ingested: IngestedRepo, facts: list[FileFacts]) -> KnowledgeGraph:
+    """Resolve facts into edges and build the structural spine. Shared by the
+    sequential and parallel paths so both produce an identical graph."""
     edges, entrypoints = resolve(facts)
     nodes = _structural_nodes(ingested, facts, edges)
     apply_entrypoints(nodes, entrypoints)
-
     return KnowledgeGraph(snapshot=ingested.snapshot, nodes=nodes, edges=edges)
+
+
+def _parse_in_parallel(
+    ingested: IngestedRepo, parseable: list[Any], aliases: dict[str, str]
+) -> list[FileFacts] | None:
+    """Parse across processes. Returns None if a pool can't be used, so the
+    caller falls back to the sequential path rather than failing."""
+    jobs = [(f.path, f.extension, f.content_hash, f.loc) for f in parseable]
+    workers = min(os.cpu_count() or 2, 8)
+    try:
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=_worker_init,
+            initargs=(ingested.root, aliases),
+        ) as pool:
+            results = list(pool.map(_worker_parse, jobs, chunksize=64))
+    except Exception:  # noqa: BLE001 - any pool failure degrades to sequential
+        return None
+    facts = [fact for fact in results if fact is not None]
+    # Scheduling order must never reach the graph: sort back to path order.
+    facts.sort(key=lambda fact: fact.path)
+    return facts
 
 
 def _read_path_aliases(root: Path) -> dict[str, str]:

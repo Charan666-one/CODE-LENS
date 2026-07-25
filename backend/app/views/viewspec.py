@@ -48,6 +48,18 @@ _CLUSTER_COLOR = "#1e293b"
 #: renderer and the truth it renders.
 _MAX_RENDERED_FILES = 600
 
+#: A district holding more than this share of the repo gets split one level
+#: deeper (see _assign_clusters) — the monorepo fix.
+_MAX_DISTRICT_SHARE = 0.35
+_MAX_DISTRICT_DEPTH = 4
+
+#: L3 adds classes and functions orbiting each file. Unbounded, n8n produced
+#: 5,035 nodes — a hairball no one can read and WebGL struggles to draw. Only
+#: the most-connected files get their members expanded, and each file's
+#: orbit is bounded, so L3 stays a readable "street view" instead of a blob.
+_MAX_L3_MEMBER_FILES = 120
+_MAX_MEMBERS_PER_FILE = 12
+
 
 def _cap_by_fan_in(files: list[Node], view: GraphView, cap: int) -> list[Node]:
     """Keep the `cap` most-connected files — the hubs a person would look for
@@ -112,7 +124,7 @@ def compile_viewspec(graph: KnowledgeGraph, *, zoom: int = 2) -> ViewSpec:
     view = GraphView(graph)
     files = [n for n in graph.nodes if n.kind is NodeKind.FILE]
 
-    cluster_of = {file.id: _cluster_key(file) for file in files}
+    cluster_of = _assign_clusters(files)
     risk_of = _risk_per_file(view, files)
     assembly = _assembly_order(view, files)
 
@@ -326,9 +338,12 @@ def _member_nodes(
     cluster_of: dict[str, str],
     assembly: dict[str, int],
 ) -> list[ViewNode]:
-    """Classes and functions orbit their file at L3."""
+    """Classes and functions orbit their file at L3 — for the files worth
+    expanding. Only the most-connected files get an orbit, and each orbit is
+    bounded: unbounded, a monorepo's L3 is an unreadable hairball."""
     found: list[ViewNode] = []
-    for file in files:
+    expandable = _cap_by_fan_in(files, view, _MAX_L3_MEMBER_FILES)
+    for file in expandable:
         fx, fy = positions[file.id]
         children = [
             child
@@ -344,7 +359,9 @@ def _member_nodes(
                     for grand_id in sorted(view.children_of(child.id))
                     if (grand := view.node(grand_id)) is not None
                 )
-        for position, member in enumerate(satellites):
+        # Most-connected members first, then bound the orbit.
+        satellites.sort(key=lambda m: (-view.fan_in(m.id, DEPENDENCY_KINDS), m.id))
+        for position, member in enumerate(satellites[:_MAX_MEMBERS_PER_FILE]):
             angle = position * 2.399963  # golden angle: no two satellites overlap
             orbit = 4.0 + 1.2 * (position % 5)
             fan_in = view.fan_in(member.id, DEPENDENCY_KINDS)
@@ -415,10 +432,50 @@ def _aggregate_edges(
 # ── the deterministic facts behind the pixels ─────────────────────────────
 
 
-def _cluster_key(file: Node) -> str:
-    """District = top-level directory; root-level files share '(root)'."""
+def _cluster_key(file: Node, depth: int = 1) -> str:
+    """District = the first `depth` path segments; root files share '(root)'."""
     path = file.file_path or file.qualified_name
-    return path.split("/", 1)[0] if "/" in path else "(root)"
+    parts = path.split("/")
+    if len(parts) <= 1:
+        return "(root)"
+    return "/".join(parts[: min(depth, len(parts) - 1)])
+
+
+def _assign_clusters(files: list[Node]) -> dict[str, str]:
+    """Districts that stay meaningful on monorepos.
+
+    A flat top-level split is useless where one directory holds nearly
+    everything: n8n puts 18,658 of its 18,779 files under `packages/`, so a
+    depth-1 split renders one giant blob and four specks — L1 tells you
+    nothing. Any district holding more than `_MAX_DISTRICT_SHARE` of the repo
+    is therefore re-split one level deeper, repeatedly, until the districts
+    are informative or the paths run out. Small repos are unaffected: nothing
+    exceeds the share, so this is exactly the old depth-1 behaviour.
+    """
+    assigned = {file.id: _cluster_key(file) for file in files}
+    by_id = {file.id: file for file in files}
+    total = max(len(files), 1)
+
+    for _ in range(_MAX_DISTRICT_DEPTH - 1):
+        counts: dict[str, int] = {}
+        for key in assigned.values():
+            counts[key] = counts.get(key, 0) + 1
+        oversized = {
+            key for key, count in counts.items() if count / total > _MAX_DISTRICT_SHARE
+        }
+        if not oversized:
+            break
+        progressed = False
+        for file_id, key in list(assigned.items()):
+            if key not in oversized:
+                continue
+            deeper = _cluster_key(by_id[file_id], depth=key.count("/") + 2)
+            if deeper != key:
+                assigned[file_id] = deeper
+                progressed = True
+        if not progressed:
+            break  # paths exhausted: the directory really is that flat
+    return assigned
 
 
 def _risk_per_file(view: GraphView, files: list[Node]) -> dict[str, float]:

@@ -88,9 +88,12 @@ def test_zoom_levels_show_different_worlds(codelens_graph: KnowledgeGraph) -> No
     l2 = compile_viewspec(codelens_graph, zoom=2)
     l3 = compile_viewspec(codelens_graph, zoom=3)
 
-    # L1: districts only — a handful of cluster nodes, no files.
+    # L1: districts only — never files, and far fewer nodes than L2. Not a
+    # fixed count: districts split deeper when one directory dominates (see
+    # _assign_clusters), so CodeLens' own `app/` resolves into its real
+    # modules rather than a single blob.
     assert all(node.kind == "cluster" for node in l1.nodes)
-    assert len(l1.nodes) < 8
+    assert len(l1.nodes) < len(l2.nodes) / 3
 
     # L2: files exist; functions do not.
     l2_kinds = {node.kind for node in l2.nodes}
@@ -265,6 +268,37 @@ def test_render_cap_produces_no_dangling_edges() -> None:
     for edge in spec.edges:
         assert edge.source in rendered
         assert edge.target in rendered
+
+
+def test_monorepo_districts_split_deeper_instead_of_one_blob() -> None:
+    """n8n puts 18,658 of 18,779 files under `packages/`; a depth-1 split
+    renders one useless blob. Districts must resolve to the real packages."""
+    from app.graph.schema import Edge
+
+    nodes = [
+        Node(
+            id=f"file:packages/{pkg}/src/mod_{i}.py",
+            kind=NodeKind.FILE,
+            name=f"mod_{i}.py",
+            qualified_name=f"packages/{pkg}/src/mod_{i}.py",
+            file_path=f"packages/{pkg}/src/mod_{i}.py",
+        )
+        for pkg in ("cli", "core", "workflow")
+        for i in range(20)
+    ]
+    snapshot = RepoSnapshot(
+        repo_url="https://example.test/mono/repo",
+        commit_sha="0" * 40,
+        primary_language="Python",
+        languages={"py": len(nodes)},
+        file_count=len(nodes),
+        analyzed_at="2026-01-01T00:00:00+00:00",
+    )
+    graph = KnowledgeGraph(snapshot=snapshot, nodes=nodes, edges=list[Edge]())
+
+    spec = compile_viewspec(graph, zoom=1)
+    labels = {node.label for node in spec.nodes}
+    assert labels == {"packages/cli", "packages/core", "packages/workflow"}
 
 
 def test_render_cap_applies_at_zoom_three_too() -> None:
