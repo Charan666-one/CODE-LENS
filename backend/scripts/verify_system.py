@@ -160,11 +160,24 @@ def main() -> int:
             import os
 
             os.environ["CODELENS_ALLOW_LOCAL_ANALYSIS"] = "1"
-            analyzed = client.post("/api/analyze", json={"source": str(fixture)})
+            accepted = client.post("/api/analyze", json={"source": str(fixture)})
+            check(
+                "analyze returns a job id immediately",
+                accepted.status_code == 202 and "job_id" in accepted.json(),
+            )
+            job_id = accepted.json()["job_id"]
+            analyzed = None
+            for _ in range(200):  # polls the status endpoint, never blocks on the pipeline
+                status = client.get(f"/api/analyze/{job_id}")
+                if status.json()["status"] in ("done", "error"):
+                    analyzed = status
+                    break
+                time.sleep(0.02)
             os.environ.pop("CODELENS_ALLOW_LOCAL_ANALYSIS")
-            ok = analyzed.status_code == 200
-            check("analyze over HTTP", ok)
+            ok = analyzed is not None and analyzed.json()["status"] == "done"
+            check("analyze completes over HTTP (polled)", ok)
             if ok:
+                assert analyzed is not None
                 sid = analyzed.json()["snapshot_id"]
                 vs = client.get(f"/api/repos/{sid}/viewspec", params={"zoom": 2})
                 check("viewspec over HTTP", vs.status_code == 200,

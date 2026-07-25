@@ -7,6 +7,15 @@ route grows an if-tree, the logic belongs in the system it fronts.
 Trust boundary (CP-1.1): the analyze endpoint accepts repository *URLs*.
 Local paths reach the ingestion layer only when CODELENS_ALLOW_LOCAL_ANALYSIS
 is set — a dev/dogfood switch, never a production default.
+
+Analyze is asynchronous (app.core.jobs): POST kicks off the pipeline on a
+background thread and returns a job id in milliseconds regardless of repo
+size; the client polls GET .../analyze/{job_id}. A large monorepo can take
+over a minute to clone and parse, and holding that open as one HTTP request
+is fragile in a way no single timeout fixes — a reverse proxy, a browser, or
+plain thread contention can each sever a long-lived request differently, so
+the same root cause looks like a different bug every time. Returning fast,
+always, removes the failure mode instead of chasing its symptoms.
 """
 
 from __future__ import annotations
@@ -18,8 +27,9 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.core import jobs
 from app.core.config import settings
-from app.core.pipeline import run_pipeline
+from app.core.pipeline import Stage, run_pipeline
 from app.graph.store import SQLiteGraphStore
 from app.graph.traversal import GraphView
 from app.ingestion import IngestionError, looks_like_remote
@@ -45,18 +55,32 @@ class AnalyzeRequest(BaseModel):
     source: str = Field(min_length=1, description="https GitHub URL (owner/repo)")
 
 
-class AnalyzeResponse(BaseModel):
-    snapshot_id: int
-    repo_url: str
-    commit_sha: str
-    skipped: bool
-    stages: list[dict[str, Any]]
-    nodes: int
-    edges: int
+class AnalyzeAccepted(BaseModel):
+    job_id: str
+    status: jobs.JobStatus = "pending"
 
 
-@router.post("/analyze", response_model=AnalyzeResponse)
-def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
+class JobStatusResponse(BaseModel):
+    job_id: str
+    status: jobs.JobStatus
+    stages: list[dict[str, Any]] = Field(default_factory=list)
+    snapshot_id: int | None = None
+    repo_url: str | None = None
+    commit_sha: str | None = None
+    skipped: bool | None = None
+    nodes: int | None = None
+    edges: int | None = None
+    error: str | None = None
+
+
+@router.post("/analyze", response_model=AnalyzeAccepted, status_code=202)
+def analyze(request: AnalyzeRequest) -> AnalyzeAccepted:
+    """Validate and kick off analysis; return a job id immediately.
+
+    Validation (the trust boundary, and a malformed URL) still happens
+    synchronously here — those fail fast with a real 400, before any thread
+    is spawned. Only the actual clone+parse+store work is backgrounded.
+    """
     source: str | Path = request.source.strip()
     if not looks_like_remote(str(source)):
         if os.environ.get("CODELENS_ALLOW_LOCAL_ANALYSIS") != "1":
@@ -71,23 +95,48 @@ def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
         except IngestionError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    try:
-        result = run_pipeline(source, get_store(), max_size_mb=settings.MAX_REPO_SIZE_MB)
-    except IngestionError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    job = jobs.registry.create()
 
-    return AnalyzeResponse(
-        snapshot_id=result.snapshot_id,
-        repo_url=result.graph.snapshot.repo_url,
-        commit_sha=result.graph.snapshot.commit_sha,
-        skipped=result.skipped,
-        stages=[
-            {"stage": stage.value, "seconds": round(seconds, 3), "skipped": skipped}
-            for stage, seconds, skipped in result.stages
-        ],
-        nodes=len(result.graph.nodes),
-        edges=len(result.graph.edges),
-    )
+    def work() -> None:
+        def on_progress(stage: Stage, seconds: float, skipped: bool) -> None:
+            jobs.registry.append_stage(
+                job.id, {"stage": stage.value, "seconds": round(seconds, 3), "skipped": skipped}
+            )
+
+        result = run_pipeline(
+            source,
+            get_store(),
+            max_size_mb=settings.MAX_REPO_SIZE_MB,
+            on_progress=on_progress,
+        )
+        jobs.registry.update(
+            job.id,
+            status="done",
+            result={
+                "snapshot_id": result.snapshot_id,
+                "repo_url": result.graph.snapshot.repo_url,
+                "commit_sha": result.graph.snapshot.commit_sha,
+                "skipped": result.skipped,
+                "nodes": len(result.graph.nodes),
+                "edges": len(result.graph.edges),
+            },
+        )
+
+    jobs.registry.run_in_background(job.id, work)
+    return AnalyzeAccepted(job_id=job.id)
+
+
+@router.get("/analyze/{job_id}", response_model=JobStatusResponse)
+def analyze_status(job_id: str) -> JobStatusResponse:
+    job = jobs.registry.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"no job {job_id}")
+    payload: dict[str, Any] = {"job_id": job.id, "status": job.status, "stages": job.stages}
+    if job.status == "done" and job.result is not None:
+        payload.update(job.result)
+    if job.status == "error":
+        payload["error"] = job.error
+    return JobStatusResponse(**payload)
 
 
 @router.get("/repos")

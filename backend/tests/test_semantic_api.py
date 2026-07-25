@@ -6,6 +6,7 @@ cleanly without one and work end-to-end with the injected fake.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -41,9 +42,21 @@ def fake_llm(monkeypatch: pytest.MonkeyPatch) -> CountingFakeLLM:
 
 
 def analyze_fixture(client: TestClient) -> int:
-    response = client.post("/api/analyze", json={"source": str(TINY_PYTHON)})
-    assert response.status_code == 200, response.text
-    return response.json()["snapshot_id"]
+    """Analyze is asynchronous (returns a job id in ms); poll to completion."""
+    accepted = client.post("/api/analyze", json={"source": str(TINY_PYTHON)})
+    assert accepted.status_code == 202, accepted.text
+    job_id = accepted.json()["job_id"]
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        status = client.get(f"/api/analyze/{job_id}")
+        body = status.json()
+        if body["status"] == "done":
+            return body["snapshot_id"]
+        if body["status"] == "error":
+            raise AssertionError(f"analyze job failed: {body['error']}")
+        time.sleep(0.02)
+    raise AssertionError(f"analyze job {job_id} did not finish within 10s")
 
 
 # ── deterministic: no key required, ever ──────────────────────────────────

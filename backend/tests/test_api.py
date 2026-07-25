@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -27,16 +29,48 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     store.close()
 
 
+def analyze_and_wait(client: TestClient, source: str, timeout: float = 10.0) -> dict[str, Any]:
+    """POST /api/analyze returns a job id in milliseconds, always — this
+    polls the status endpoint to completion, exactly as the frontend does."""
+    accepted = client.post("/api/analyze", json={"source": source})
+    assert accepted.status_code == 202, accepted.text
+    job_id = accepted.json()["job_id"]
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = client.get(f"/api/analyze/{job_id}")
+        assert status.status_code == 200
+        body = status.json()
+        if body["status"] == "done":
+            return body
+        if body["status"] == "error":
+            raise AssertionError(f"analyze job failed: {body['error']}")
+        time.sleep(0.02)
+    raise AssertionError(f"analyze job {job_id} did not finish within {timeout}s")
+
+
 def analyze_fixture(client: TestClient) -> int:
+    return analyze_and_wait(client, str(TINY_PYTHON))["snapshot_id"]
+
+
+def test_analyze_returns_a_job_id_immediately(client: TestClient) -> None:
+    """The whole point: this must never block on the pipeline, regardless of
+    repo size — a large monorepo must return exactly as fast as a tiny one."""
+    started = time.monotonic()
     response = client.post("/api/analyze", json={"source": str(TINY_PYTHON)})
-    assert response.status_code == 200, response.text
-    return response.json()["snapshot_id"]
+    elapsed = time.monotonic() - started
+    assert response.status_code == 202
+    assert "job_id" in response.json()
+    assert response.json()["status"] == "pending"
+    assert elapsed < 1.0
+
+
+def test_unknown_job_id_is_404(client: TestClient) -> None:
+    assert client.get("/api/analyze/does-not-exist").status_code == 404
 
 
 def test_analyze_runs_the_real_pipeline(client: TestClient) -> None:
-    response = client.post("/api/analyze", json={"source": str(TINY_PYTHON)})
-    body = response.json()
-    assert response.status_code == 200
+    body = analyze_and_wait(client, str(TINY_PYTHON))
     assert body["nodes"] > 0 and body["edges"] > 0
     assert [s["stage"] for s in body["stages"]] == [
         "cloned",
@@ -46,9 +80,29 @@ def test_analyze_runs_the_real_pipeline(client: TestClient) -> None:
     ]
 
     # Second run: the digest skip must surface through the API too.
-    again = client.post("/api/analyze", json={"source": str(TINY_PYTHON)}).json()
+    again = analyze_and_wait(client, str(TINY_PYTHON))
     assert again["skipped"] is True
     assert again["snapshot_id"] == body["snapshot_id"]
+
+
+def test_analyze_job_error_is_reported_not_swallowed(client: TestClient) -> None:
+    """A background failure (here: an oversized-looking clone target that
+    doesn't exist) must surface as status=error with a real message, not a
+    silently stuck job or an unhandled crash."""
+    accepted = client.post(
+        "/api/analyze", json={"source": "https://github.com/psf/no-such-repo-xyz-123"}
+    )
+    job_id = accepted.json()["job_id"]
+
+    deadline = time.monotonic() + 15.0
+    body: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        body = client.get(f"/api/analyze/{job_id}").json()
+        if body["status"] in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert body["status"] == "error"
+    assert body["error"]
 
 
 def test_analyze_rejects_local_paths_unless_enabled(
