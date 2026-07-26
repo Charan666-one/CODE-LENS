@@ -173,6 +173,34 @@ def query(snapshot_id: int, name: str, request: QueryRequest) -> dict[str, Any]:
     return result.model_dump()
 
 
+@router.get("/repos/{snapshot_id}/explain")
+def explain(snapshot_id: int, node_id: str) -> dict[str, Any]:
+    """Everything needed to explain one file or folder: what it is, what it
+    depends on, what depends on it, and the evidence for each claim.
+
+    Deterministic — no API key, no tokens. Narration (CP-3.4) layers prose on
+    top of this payload; it never replaces the facts.
+    """
+    graph = get_store().load_graph_by_id(snapshot_id)
+    if graph is None:
+        raise HTTPException(status_code=404, detail=f"no snapshot {snapshot_id}")
+    try:
+        result = run_query("explain", GraphView(graph), node_id=node_id)
+    except QueryError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    payload = result.model_dump()
+    # The summary, when one exists, is the human sentence for this node.
+    for annotation in graph.annotations:
+        if annotation.node_id == node_id:
+            payload["summary"] = {
+                "text": annotation.summary,
+                "derived_from": annotation.derived_from,
+                "model": annotation.model,
+            }
+            break
+    return payload
+
+
 @router.get("/queries")
 def queries() -> list[str]:
     return registered_queries()

@@ -16,6 +16,9 @@ export interface ViewNode {
   is_entrypoint: boolean;
   file_path: string | null;
   start_line: number | null;
+  /** The real graph node behind this pixel. Cluster nodes are a view-layer
+   *  invention with no graph node of their own, so queries must follow this. */
+  explain_id: string | null;
 }
 
 export interface ViewEdge {
@@ -69,6 +72,59 @@ export interface RankedNode {
     distance: number;
     fan_in: number;
     path_confidence: "resolved" | "heuristic" | "dynamic_unknown";
+  };
+}
+
+export interface Neighbour {
+  id: string;
+  name: string;
+  file_path: string | null;
+  references: number;
+}
+
+/** The explain ResultGraph — every field a checkable graph fact. */
+export interface Explanation {
+  focus_id: string;
+  paths: Record<string, string[]>;
+  summary?: { text: string; derived_from: string[]; model: string };
+  meta: {
+    identity: {
+      id: string;
+      kind: string;
+      name: string;
+      qualified_name: string;
+      file_path: string | null;
+      start_line: number | null;
+      end_line: number | null;
+      language: string | null;
+      loc: number | null;
+      complexity: number | null;
+      docstring: string | null;
+      churn_count: number | null;
+      author_count: number | null;
+      last_modified: string | null;
+    };
+    role: {
+      is_entrypoint: boolean;
+      entrypoint_kind: string | null;
+      direct_dependents: number;
+      direct_dependencies: number;
+      transitive_dependents: number;
+      verdict: string;
+    };
+    depends_on: Neighbour[];
+    used_by: Neighbour[];
+    contains: {
+      counts: Record<string, number>;
+      top: {
+        id: string;
+        name: string;
+        kind: string;
+        fan_in: number;
+        file_path: string | null;
+        start_line: number | null;
+      }[];
+    };
   };
 }
 

@@ -86,6 +86,10 @@ class ViewNode(BaseModel):
     # Every visual claim clickable down to code (EXPERIENCE non-negotiable):
     file_path: str | None = None
     start_line: int | None = None
+    #: The real graph node this stands for. Cluster nodes are a view-layer
+    #: invention ("cluster:src") with no node behind them, so anything that
+    #: queries the graph must follow this instead of the render id.
+    explain_id: str | None = None
 
 
 class ViewEdge(BaseModel):
@@ -206,6 +210,11 @@ def _district_view(
                 risk=risk,
                 fan_in=sum(view.fan_in(f.id, DEPENDENCY_KINDS) for f in cluster_files),
                 is_entrypoint=any(_contains_entrypoint(view, f) for f in cluster_files),
+                explain_id=(
+                    f"{NodeKind.MODULE.value}:{cluster_id}"
+                    if view.has_node(f"{NodeKind.MODULE.value}:{cluster_id}")
+                    else None
+                ),
             )
         )
 

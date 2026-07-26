@@ -15,6 +15,7 @@ export default function HUD() {
   const rippleFor = useGraphStore((s) => s.rippleFor);
   const showRipple = useGraphStore((s) => s.showRipple);
   const clearRipple = useGraphStore((s) => s.clearRipple);
+  const openExplanation = useGraphStore((s) => s.openExplanation);
 
   if (phase !== "exploring" && phase !== "revealing") return null;
 
@@ -81,9 +82,17 @@ export default function HUD() {
               </button>
             </div>
           ) : (
-            <button className="ripple-trigger" onClick={() => showRipple(selected.id)}>
-              ⟿ What breaks if I change this?
-            </button>
+            <>
+              <button
+                className="explain-trigger"
+                onClick={() => openExplanation(selected.explain_id ?? selected.id)}
+              >
+                Explain this {selected.kind}
+              </button>
+              <button className="ripple-trigger" onClick={() => showRipple(selected.explain_id ?? selected.id)}>
+                ⟿ What breaks if I change this?
+              </button>
+            </>
           )}
         </aside>
       )}

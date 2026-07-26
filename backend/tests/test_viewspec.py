@@ -270,6 +270,20 @@ def test_render_cap_produces_no_dangling_edges() -> None:
         assert edge.target in rendered
 
 
+def test_cluster_nodes_carry_a_real_graph_node_to_explain() -> None:
+    """Regression: L1 renders synthetic ids ("cluster:src") that no query can
+    resolve — clicking Explain on a district returned "unknown node". Each
+    cluster must name the real module node it stands for."""
+    graph = parse_repository(BACKEND_DIR, max_size_mb=5_000)
+    spec = compile_viewspec(graph, zoom=1)
+    node_ids = {n.id for n in graph.nodes}
+    assert spec.nodes, "CodeLens has districts"
+    resolvable = [n for n in spec.nodes if n.explain_id]
+    assert resolvable, "districts must be explainable"
+    for node in resolvable:
+        assert node.explain_id in node_ids
+
+
 def test_monorepo_districts_split_deeper_instead_of_one_blob() -> None:
     """n8n puts 18,658 of 18,779 files under `packages/`; a depth-1 split
     renders one useless blob. Districts must resolve to the real packages."""

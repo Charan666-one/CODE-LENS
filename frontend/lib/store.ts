@@ -1,8 +1,8 @@
 "use client";
 
 import { create } from "zustand";
-import { analyzeRepo, fetchBlastRadius, fetchViewSpec } from "./api";
-import type { BlastResult, PipelineStage, ViewSpec } from "./types";
+import { analyzeRepo, fetchBlastRadius, fetchExplanation, fetchViewSpec } from "./api";
+import type { BlastResult, Explanation, PipelineStage, ViewSpec } from "./types";
 
 /** The Graph State Manager (ARCHITECTURE.md: the game-engine model).
  *
@@ -53,6 +53,14 @@ interface GraphState {
   showRipple: (nodeId: string) => Promise<void>;
   advanceRipple: () => void;
   clearRipple: () => void;
+
+  /** The explanation page: why the project needs this file or folder.
+   *  Deterministic facts — no API key required. */
+  explanation: Explanation | null;
+  explaining: string | null;
+  explainError: string | null;
+  openExplanation: (nodeId: string) => Promise<void>;
+  closeExplanation: () => void;
 }
 
 export const useGraphStore = create<GraphState>((set, get) => ({
@@ -156,4 +164,26 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   },
 
   clearRipple: () => set({ blast: null, rippleFor: null, rippleFront: 0 }),
+
+  explanation: null,
+  explaining: null,
+  explainError: null,
+
+  openExplanation: async (nodeId: string) => {
+    const { snapshotId } = get();
+    if (snapshotId === null) return;
+    set({ explaining: nodeId, explanation: null, explainError: null });
+    try {
+      const explanation = await fetchExplanation(snapshotId, nodeId);
+      // Ignore a stale response if the user moved on to another node.
+      if (get().explaining === nodeId) set({ explanation });
+    } catch (error) {
+      if (get().explaining === nodeId) {
+        set({ explainError: (error as Error).message });
+      }
+    }
+  },
+
+  closeExplanation: () =>
+    set({ explanation: null, explaining: null, explainError: null }),
 }));

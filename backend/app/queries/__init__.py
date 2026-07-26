@@ -10,6 +10,7 @@ from app.queries import (  # noqa: F401  (imported for their @register side effe
     blast_radius,
     centrality,
     dependencies,
+    explain,
     risk,
     structure,
 )
