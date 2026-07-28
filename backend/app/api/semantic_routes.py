@@ -22,8 +22,8 @@ from urllib.parse import unquote, urlparse
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.core.graph_cache import cache
 from app.graph.schema import KnowledgeGraph
-from app.graph.traversal import GraphView
 from app.ingestion import IngestionError, ingest
 from app.queries import QueryError, run_query
 from app.semantic import (
@@ -52,10 +52,20 @@ def get_llm() -> LLMClient:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+def _view(snapshot_id: int):
+    """The cached traversal view; the graph was already loaded by _load."""
+    from app.api.routes import get_store
+
+    view = cache.view(get_store(), snapshot_id)
+    if view is None:
+        raise HTTPException(status_code=404, detail=f"no snapshot {snapshot_id}")
+    return view
+
+
 def _load(snapshot_id: int) -> KnowledgeGraph:
     from app.api.routes import get_store
 
-    graph = get_store().load_graph_by_id(snapshot_id)
+    graph = cache.graph(get_store(), snapshot_id)
     if graph is None:
         raise HTTPException(status_code=404, detail=f"no snapshot {snapshot_id}")
     return graph
@@ -75,10 +85,10 @@ def concept_search(snapshot_id: int, request: SearchRequest) -> dict[str, Any]:
     index = _INDEXES.get(snapshot_id)
     if index is None:
         index = ConceptIndex()
-        index.build(GraphView(graph), graph.annotations)
+        index.build(_view(snapshot_id), graph.annotations)
         _INDEXES[snapshot_id] = index
     result = run_query(
-        "concept_search", GraphView(graph), index=index, text=request.text, top=request.top
+        "concept_search", _view(snapshot_id), index=index, text=request.text, top=request.top
     )
     return result.model_dump()
 
@@ -86,7 +96,7 @@ def concept_search(snapshot_id: int, request: SearchRequest) -> dict[str, Any]:
 @router.get("/answers/learning_path")
 def answer_learning_path(snapshot_id: int) -> dict[str, Any]:
     graph = _load(snapshot_id)
-    return learning_path(GraphView(graph), graph.annotations).model_dump()
+    return learning_path(_view(snapshot_id), graph.annotations).model_dump()
 
 
 # ── LLM-narrated answers ──────────────────────────────────────────────────
@@ -97,7 +107,7 @@ def answer_project(snapshot_id: int) -> dict[str, Any]:
     graph = _load(snapshot_id)
     llm = get_llm()
     try:
-        return narrate_project(GraphView(graph), graph.annotations, llm).model_dump()
+        return narrate_project(_view(snapshot_id), graph.annotations, llm).model_dump()
     except LLMError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -110,7 +120,7 @@ class BlastStoryRequest(BaseModel):
 @router.post("/answers/blast_radius")
 def answer_blast_radius(snapshot_id: int, request: BlastStoryRequest) -> dict[str, Any]:
     graph = _load(snapshot_id)
-    view = GraphView(graph)
+    view = _view(snapshot_id)
     try:
         result = run_query(
             "blast_radius", view, node_id=request.node_id, max_depth=request.max_depth
@@ -143,13 +153,15 @@ def summarize(snapshot_id: int, request: SummarizeRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     annotations, report = summarize_graph(
-        GraphView(graph),
+        _view(snapshot_id),
         root,
         get_store(),
         snapshot_id,
         llm,
         max_nodes=request.max_nodes,
     )
+    # New annotations change the graph a cached view was built from.
+    cache.invalidate(snapshot_id)
     _INDEXES.pop(snapshot_id, None)  # new annotations: the index must rebuild
     return {
         "annotations": len(annotations),

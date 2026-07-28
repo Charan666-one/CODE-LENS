@@ -29,9 +29,9 @@ from pydantic import BaseModel, Field
 
 from app.core import jobs
 from app.core.config import settings
+from app.core.graph_cache import cache
 from app.core.pipeline import Stage, run_pipeline
 from app.graph.store import SQLiteGraphStore
-from app.graph.traversal import GraphView
 from app.ingestion import IngestionError, looks_like_remote
 from app.ingestion.clone import normalize_repo_url
 from app.queries import QueryError, registered_queries, run_query
@@ -146,13 +146,14 @@ def list_repos() -> list[dict[str, Any]]:
 
 @router.get("/repos/{snapshot_id}/viewspec")
 def viewspec(snapshot_id: int, zoom: int = 2) -> dict[str, Any]:
-    graph = get_store().load_graph_by_id(snapshot_id)
+    if zoom not in (1, 2, 3):
+        raise HTTPException(status_code=400, detail=f"zoom must be 1, 2 or 3, got {zoom}")
+    graph = cache.graph(get_store(), snapshot_id)
     if graph is None:
         raise HTTPException(status_code=404, detail=f"no snapshot {snapshot_id}")
-    try:
-        return compile_viewspec(graph, zoom=zoom).model_dump()
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return cache.viewspec(
+        snapshot_id, zoom, lambda: compile_viewspec(graph, zoom=zoom).model_dump()
+    )
 
 
 class QueryRequest(BaseModel):
@@ -161,11 +162,11 @@ class QueryRequest(BaseModel):
 
 @router.post("/repos/{snapshot_id}/query/{name}")
 def query(snapshot_id: int, name: str, request: QueryRequest) -> dict[str, Any]:
-    graph = get_store().load_graph_by_id(snapshot_id)
-    if graph is None:
+    view = cache.view(get_store(), snapshot_id)
+    if view is None:
         raise HTTPException(status_code=404, detail=f"no snapshot {snapshot_id}")
     try:
-        result = run_query(name, GraphView(graph), **request.params)
+        result = run_query(name, view, **request.params)
     except QueryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except TypeError as exc:  # wrong/missing params for the plan
@@ -181,11 +182,12 @@ def explain(snapshot_id: int, node_id: str) -> dict[str, Any]:
     Deterministic — no API key, no tokens. Narration (CP-3.4) layers prose on
     top of this payload; it never replaces the facts.
     """
-    graph = get_store().load_graph_by_id(snapshot_id)
-    if graph is None:
+    graph = cache.graph(get_store(), snapshot_id)
+    view = cache.view(get_store(), snapshot_id)
+    if graph is None or view is None:
         raise HTTPException(status_code=404, detail=f"no snapshot {snapshot_id}")
     try:
-        result = run_query("explain", GraphView(graph), node_id=node_id)
+        result = run_query("explain", view, node_id=node_id)
     except QueryError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     payload = result.model_dump()

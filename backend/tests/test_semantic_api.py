@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 import app.api.routes as routes
 import app.api.semantic_routes as semantic
+from app.core.graph_cache import cache as graph_cache
 from app.graph.store import SQLiteGraphStore
 from app.main import app
 from app.semantic import CountingFakeLLM
@@ -28,6 +29,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     monkeypatch.setenv("CODELENS_ALLOW_LOCAL_ANALYSIS", "1")
     store = SQLiteGraphStore(tmp_path / "api.db")
     monkeypatch.setattr(routes, "_STORE", store)
+    graph_cache.clear()  # snapshot ids restart per test; never serve a stale graph
     semantic._INDEXES.clear()
     with TestClient(app) as test_client:
         yield test_client
