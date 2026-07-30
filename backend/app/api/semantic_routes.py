@@ -27,10 +27,10 @@ from app.graph.schema import KnowledgeGraph
 from app.ingestion import IngestionError, ingest
 from app.queries import QueryError, run_query
 from app.semantic import (
-    AnthropicClient,
     ConceptIndex,
     LLMClient,
     LLMError,
+    build_llm,
     learning_path,
     narrate_blast_radius,
     narrate_project,
@@ -47,7 +47,7 @@ _INDEXES: dict[int, ConceptIndex] = {}
 def get_llm() -> LLMClient:
     """The narration model. Overridden in tests; 503s cleanly without a key."""
     try:
-        return AnthropicClient()
+        return build_llm()
     except LLMError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

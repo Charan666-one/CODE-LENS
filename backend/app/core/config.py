@@ -36,6 +36,16 @@ class Settings(BaseSettings):
     # Unset until CP-3.2. Absence must never break the graph pipeline.
     ANTHROPIC_API_KEY: str | None = None
 
+    # ── Provider selection (CP-3.x) ───────────────────────────────────────
+    # "auto" picks whichever provider is configured, cheapest-to-start first:
+    # ollama (local, free) -> groq (free tier) -> openrouter -> anthropic.
+    # Set explicitly to pin one. Everything deterministic ignores all of it.
+    LLM_PROVIDER: str = "auto"
+    GROQ_API_KEY: str | None = None
+    OPENROUTER_API_KEY: str | None = None
+    OLLAMA_BASE_URL: str = "http://localhost:11434/v1"
+    LLM_MODEL: str | None = None  # override the provider's default model
+
     @property
     def sqlite_url(self) -> str:
         """SQLAlchemy-style URL, for whenever a driver actually needs one."""

@@ -9,7 +9,14 @@ from __future__ import annotations
 
 from app.semantic.context import ContextBundle, assemble
 from app.semantic.embeddings import ConceptIndex, LocalHashEmbedding
-from app.semantic.llm import AnthropicClient, CountingFakeLLM, LLMClient, LLMError
+from app.semantic.llm import (
+    AnthropicClient,
+    CountingFakeLLM,
+    LLMClient,
+    LLMError,
+    OpenAICompatibleClient,
+    build_llm,
+)
 from app.semantic.narration import (
     NarratedAnswer,
     learning_path,
@@ -20,6 +27,8 @@ from app.semantic.summaries import SummaryReport, summarize_graph
 
 __all__ = [
     "AnthropicClient",
+    "OpenAICompatibleClient",
+    "build_llm",
     "ConceptIndex",
     "ContextBundle",
     "CountingFakeLLM",
