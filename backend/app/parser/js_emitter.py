@@ -84,7 +84,16 @@ def resolve_alias(specifier: str, aliases: dict[str, str]) -> str | None:
 
 
 def _resolve_relative(specifier: str, importing_path: str) -> str | None:
-    """'./calc.js' seen from src/main.js -> 'src.calc'. None for bare/external."""
+    """'./calc.js' seen from src/main.js -> 'src.calc'. None for bare/external.
+
+    A specifier that walks all the way up to the repository root means the
+    package itself — `require('../')` from a test file is how most Node
+    projects import the thing they are testing. Returning None there cost
+    Express 90 of its 141 files' import edges, which the backtest surfaced as
+    "the graph named nothing at all for 66% of examples". Resolving it to
+    `index` lets the root entry file answer, and SymbolTable's existing
+    `.index` aliasing handles every non-root directory already.
+    """
     if not specifier.startswith("."):
         return None
     base = PurePosixPath(importing_path).parent
@@ -98,7 +107,7 @@ def _resolve_relative(specifier: str, importing_path: str) -> str | None:
             continue
         combined.append(segment)
     if not combined:
-        return None
+        return "index"
     last = combined[-1]
     for extension in _JS_EXTENSIONS:
         if last.endswith(extension):
