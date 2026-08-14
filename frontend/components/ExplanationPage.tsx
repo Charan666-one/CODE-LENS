@@ -2,7 +2,12 @@
 
 import { useEffect } from "react";
 import { useGraphStore } from "@/lib/store";
-import type { CoChangePartner, Ownership as OwnershipFacts, TestFile } from "@/lib/types";
+import type {
+  CoChangePartner,
+  EndpointRef,
+  Ownership as OwnershipFacts,
+  TestFile,
+} from "@/lib/types";
 
 /** The explanation page: why the project needs this file or folder.
  *
@@ -127,6 +132,8 @@ export default function ExplanationPage() {
               </section>
             )}
 
+            <Endpoints endpoints={explanation.meta.endpoints ?? []} />
+
             <Coverage
               tests={explanation.meta.tested_by ?? []}
               isTestFile={identity.file_path?.includes("test") ?? false}
@@ -194,6 +201,42 @@ function Stat({
       <dd>{value}</dd>
       {hint && <span>{hint}</span>}
     </div>
+  );
+}
+
+/** The URLs a change here would reach.
+ *
+ *  Placed directly under the stats because it is the most decision-shaped
+ *  fact on the page: a dependent count is a number to interpret, and a list
+ *  of routes is something you can hold against a deploy.
+ */
+function Endpoints({ endpoints }: { endpoints: EndpointRef[] }) {
+  if (endpoints.length === 0) return null;
+
+  return (
+    <section className="explain-section">
+      <h2>
+        Endpoints affected{" "}
+        <span className="explain-counts">
+          changing this changes what these serve
+        </span>
+      </h2>
+      <ul className="explain-list">
+        {endpoints.map((endpoint) => (
+          <li key={endpoint.id}>
+            <div className="explain-static">
+              <span className="explain-name">
+                <span className="explain-method">{endpoint.method}</span>
+                {endpoint.path}
+              </span>
+              <span className="explain-meta">
+                {endpoint.file_path?.split("/").pop()}
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

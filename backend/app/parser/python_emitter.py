@@ -18,7 +18,8 @@ from tree_sitter import Node as TSNode
 
 from app.graph.schema import EntrypointKind, Node, NodeKind
 from app.parser.complexity import complexity_by_line
-from app.parser.facts import FileFacts, RawBase, RawCall, RawImport
+from app.parser.facts import FileFacts, RawBase, RawCall, RawImport, RawRoute
+from app.parser.routes import join_path, parse_decorator_route, router_prefix
 
 _LANGUAGE = Language(tree_sitter_python.language())
 
@@ -105,6 +106,8 @@ class _FileWalker:
         self.source = source
         self.complexity = complexity
         self._seen_ids: set[str] = set()
+        #: variable name -> mount prefix, for routers declared in this file
+        self._router_prefixes: dict[str, str] = {}
 
     # ── traversal ─────────────────────────────────────────────────────────
 
@@ -123,6 +126,9 @@ class _FileWalker:
         if kind == "if_statement" and self._is_main_guard(node):
             self._visit_main_guard(node, ctx)
             return
+        if kind == "assignment":
+            self._record_router(node)
+            # fall through: the right-hand side may contain calls
         if kind == "call":
             self._record_call(node, ctx)
             # fall through: arguments may contain further calls
@@ -130,6 +136,21 @@ class _FileWalker:
         for child in node.children:
             if child.is_named:
                 self.visit(child, ctx)
+
+    def _record_router(self, node: TSNode) -> None:
+        """`router = APIRouter(prefix="/api")` — remember where it mounts.
+
+        Recorded during the walk, which is enough because a router is
+        constructed above the handlers decorated with it; a file that did the
+        reverse would lose the prefix rather than get a wrong one.
+        """
+        left = node.child_by_field_name("left")
+        right = node.child_by_field_name("right")
+        if left is None or right is None or left.text is None or right.text is None:
+            return
+        prefix = router_prefix(right.text.decode("utf-8", errors="replace"))
+        if prefix is not None:
+            self._router_prefixes[left.text.decode("utf-8", errors="replace")] = prefix
 
     def _visit_decorated(self, node: TSNode, ctx: _Context) -> None:
         decorators = [
@@ -180,6 +201,27 @@ class _FileWalker:
         )
         self.facts.nodes.append(graph_node)
         self.facts.contains.append((ctx.container_id, node_id))
+
+        # A decorated function can serve several routes — FastAPI stacking
+        # @app.get and @app.post over one handler is idiomatic — so every
+        # decorator is checked, not just the first that matches.
+        if not is_class:
+            for decorator in decorators:
+                route = parse_decorator_route(decorator)
+                if route is None:
+                    continue
+                method, path = route
+                receiver = decorator.lstrip("@").strip().split("(", 1)[0]
+                prefix = self._router_prefixes.get(receiver.rsplit(".", 2)[0])
+                self.facts.routes.append(
+                    RawRoute(
+                        method=method,
+                        path=join_path(prefix, path),
+                        handler_id=node_id,
+                        line=start_line,
+                        framework="decorator",
+                    )
+                )
 
         if ctx.container_id == self.facts.file_node.id:
             target = self.facts.module_classes if is_class else self.facts.module_functions

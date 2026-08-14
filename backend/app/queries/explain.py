@@ -124,32 +124,62 @@ def explain(view: GraphView, *, node_id: str) -> ResultGraph:
             "co_changes": _co_change_summary(view, scope),
             "tested_by": _tested_by(view, scope),
             "ownership": _ownership(view, node, scope),
+            "endpoints": _endpoints_reached(view, node_id),
         },
     )
+
+
+def _endpoints_reached(view: GraphView, node_id: str) -> list[dict[str, Any]]:
+    """The HTTP routes a change here would reach.
+
+    "Twelve files depend on this" is abstract. "POST /checkout and DELETE
+    /account go through this" is the same fact in the vocabulary of the
+    person deciding whether to deploy on a Friday.
+    """
+    from app.queries.endpoints import endpoints as endpoints_query
+
+    result = endpoints_query(view, node_id=node_id, limit=_TOP_NEIGHBOURS)
+    return [
+        {
+            "id": row["id"],
+            "method": row["method"],
+            "path": row["path"],
+            # Several files can legitimately declare `GET /`; without the file
+            # the list reads as a repeated row rather than as distinct routes.
+            "file_path": row["file_path"],
+        }
+        for row in result.meta["endpoints"]
+    ]
 
 
 def _tested_by(view: GraphView, scope: set[str]) -> list[dict[str, Any]]:
     """The test files that import this. Empty is a real answer, not a gap in
     the data — it means no test reaches here by import."""
-    found: list[dict[str, Any]] = []
+    # Keyed by test file, not by edge: explaining a folder puts several of its
+    # files in scope, and one conftest.py testing three of them is still one
+    # test file. Listing it three times is noise (and a duplicate React key).
+    found: dict[str, dict[str, Any]] = {}
     for source, target, attributes in view.g.edges(data=True):
         if attributes["kind"] is not EdgeKind.TESTS or target not in scope:
             continue
         test_file = view.node(source)
         if test_file is None:
             continue
-        found.append(
-            {
-                "id": test_file.id,
-                "name": test_file.name,
-                "file_path": test_file.file_path,
-                # A name match ("test_views tests views") is a stronger claim
-                # than "a test happened to import this".
-                "named_for_it": attributes["confidence"] is CallConfidence.RESOLVED,
-            }
-        )
-    found.sort(key=lambda t: (not t["named_for_it"], t["id"]))
-    return found[:_TOP_NEIGHBOURS]
+        # A name match ("test_views tests views") is a stronger claim than
+        # "a test happened to import this", and the strongest link wins.
+        named = attributes["confidence"] is CallConfidence.RESOLVED
+        existing = found.get(test_file.id)
+        if existing is not None:
+            existing["named_for_it"] = existing["named_for_it"] or named
+            continue
+        found[test_file.id] = {
+            "id": test_file.id,
+            "name": test_file.name,
+            "file_path": test_file.file_path,
+            "named_for_it": named,
+        }
+    ordered = sorted(found.values(), key=lambda t: (not t["named_for_it"], t["id"]))
+    return ordered[:_TOP_NEIGHBOURS]
 
 
 def _ownership(view: GraphView, node: Any, scope: set[str]) -> dict[str, Any] | None:

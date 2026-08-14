@@ -22,7 +22,14 @@ from typing import Any
 import tree_sitter_typescript
 from tree_sitter import Language
 
-from app.graph.schema import Edge, EdgeKind, KnowledgeGraph, Node, NodeKind
+from app.graph.schema import (
+    Edge,
+    EdgeKind,
+    EntrypointKind,
+    KnowledgeGraph,
+    Node,
+    NodeKind,
+)
 from app.ingestion import IngestedRepo, snapshot_directory
 from app.parser.facts import FileFacts
 from app.parser.js_emitter import JsEmitter
@@ -140,7 +147,73 @@ def _assemble(ingested: IngestedRepo, facts: list[FileFacts]) -> KnowledgeGraph:
     edges, entrypoints = resolve(facts)
     nodes = _structural_nodes(ingested, facts, edges)
     apply_entrypoints(nodes, entrypoints)
+    endpoint_nodes, endpoint_edges = _endpoints(facts)
+    nodes.extend(endpoint_nodes)
+    edges.extend(endpoint_edges)
     return KnowledgeGraph(snapshot=ingested.snapshot, nodes=nodes, edges=edges)
+
+
+def _endpoints(facts: list[FileFacts]) -> tuple[list[Node], list[Edge]]:
+    """ENDPOINT nodes and the ROUTES_TO edges that reach their handlers.
+
+    One node per (method, path) *per file*: two files legitimately declaring
+    `GET /health` are two endpoints on two routers, and merging them would
+    invent a relationship. The file also holds the endpoint in the CONTAINS
+    spine, so it appears on the map where its code lives.
+    """
+    nodes: list[Node] = []
+    edges: list[Edge] = []
+    seen: set[str] = set()
+
+    for file_facts in facts:
+        for route in file_facts.routes:
+            label = f"{route.method} {route.path}"
+            # `id == f"{kind}:{qualified_name}"` is an invariant the whole
+            # graph relies on, so the qualified name carries the file too.
+            qualified_name = f"{file_facts.path}:{label}"
+            node_id = f"{NodeKind.ENDPOINT.value}:{qualified_name}"
+            if node_id in seen:
+                continue  # the same route declared twice in one file
+            seen.add(node_id)
+
+            nodes.append(
+                Node(
+                    id=node_id,
+                    kind=NodeKind.ENDPOINT,
+                    name=label,
+                    qualified_name=qualified_name,
+                    file_path=file_facts.path,
+                    start_line=route.line,
+                    language=file_facts.file_node.language,
+                    is_entrypoint=True,
+                    entrypoint_kind=EntrypointKind.HTTP_ROUTE,
+                    extra={
+                        "method": route.method,
+                        "path": route.path,
+                        "framework": route.framework,
+                    },
+                )
+            )
+            # The endpoint lives in its file, structurally.
+            edges.append(
+                Edge(
+                    source_id=file_facts.file_node.id,
+                    target_id=node_id,
+                    kind=EdgeKind.CONTAINS,
+                )
+            )
+            if route.handler_id and route.handler_id != file_facts.file_node.id:
+                edges.append(
+                    Edge(
+                        source_id=node_id,
+                        target_id=route.handler_id,
+                        kind=EdgeKind.ROUTES_TO,
+                        file_path=file_facts.path,
+                        line=route.line,
+                    )
+                )
+
+    return nodes, edges
 
 
 def _parse_in_parallel(

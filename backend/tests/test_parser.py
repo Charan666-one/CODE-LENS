@@ -378,11 +378,51 @@ def test_http_route_decorators_mark_entrypoints(tmp_path: Path) -> None:
             """
         },
     )
-    marked = {n.qualified_name: n.entrypoint_kind for n in graph.nodes if n.is_entrypoint}
+    marked = {
+        n.qualified_name: n.entrypoint_kind
+        for n in graph.nodes
+        if n.is_entrypoint and n.kind is not NodeKind.ENDPOINT
+    }
     assert marked == {
         "api.health": EntrypointKind.HTTP_ROUTE,
         "api.create_item": EntrypointKind.HTTP_ROUTE,
     }
+
+
+def test_route_decorators_become_addressable_endpoints(tmp_path: Path) -> None:
+    """The handler being *marked* is not enough — a route has a method and a
+    path, and one handler can serve several. Only a node can carry that."""
+    graph = build(
+        tmp_path,
+        {
+            "api.py": """
+            app = object()
+
+            @app.get("/users/{id}")
+            @app.head("/users/{id}")
+            def read_user(id):
+                return {}
+
+            @app.route("/legacy", methods=["POST"])
+            def legacy():
+                return {}
+
+            @app.get(BUILT + "/computed")
+            def computed():
+                return {}
+            """
+        },
+    )
+    endpoints = {n.name: n for n in graph.nodes if n.kind is NodeKind.ENDPOINT}
+    assert set(endpoints) == {"GET /users/{id}", "HEAD /users/{id}", "POST /legacy"}
+    # A path built at runtime resolves to nothing rather than to a wrong string.
+    assert not any("computed" in name for name in endpoints)
+
+    routes_to = {
+        (e.source_id, e.target_id) for e in graph.edges if e.kind is EdgeKind.ROUTES_TO
+    }
+    assert (endpoints["GET /users/{id}"].id, "function:api.read_user") in routes_to
+    assert (endpoints["POST /legacy"].id, "function:api.legacy") in routes_to
 
 
 def test_cli_decorators_mark_entrypoints(tmp_path: Path) -> None:

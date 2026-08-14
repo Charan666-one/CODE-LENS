@@ -37,7 +37,8 @@ from tree_sitter import Language, Parser
 from tree_sitter import Node as TSNode
 
 from app.graph.schema import Node, NodeKind
-from app.parser.facts import FileFacts, RawBase, RawCall, RawImport
+from app.parser.facts import FileFacts, RawBase, RawCall, RawImport, RawRoute
+from app.parser.routes import parse_call_route
 
 _LANGUAGE = Language(tree_sitter_javascript.language())
 
@@ -562,6 +563,44 @@ class _JsWalker:
                 class_qname=ctx.class_qname,
             )
         )
+        self._record_route(node, callee, ctx)
+
+    def _record_route(self, node: TSNode, callee: str, ctx: _Context) -> None:
+        """`app.get("/users", handler)` — the Express family's route shape.
+
+        The handler is whatever the walker can name. A named function passed
+        by reference resolves to that function; an inline arrow or callback
+        has no node of its own, so the route attaches to the enclosing scope,
+        which is where a reader would look for it anyway.
+        """
+        first = self._first_argument_text(node)
+        if first is None:
+            return
+        route = parse_call_route(callee, first)
+        if route is None:
+            return
+        method, path = route
+        self.facts.routes.append(
+            RawRoute(
+                method=method,
+                path=path,
+                handler_id=ctx.scope_id,
+                line=node.start_point[0] + 1,
+                framework="express",
+            )
+        )
+
+    def _first_argument_text(self, call: TSNode) -> str | None:
+        arguments = call.child_by_field_name("arguments")
+        if arguments is None:
+            return None
+        for argument in arguments.children:
+            if not argument.is_named:
+                continue  # skip the parens and commas
+            if argument.text is None:
+                return None
+            return argument.text.decode("utf-8", errors="replace")
+        return None
 
     def _callee_text(self, call: TSNode) -> str | None:
         function = call.child_by_field_name("function")

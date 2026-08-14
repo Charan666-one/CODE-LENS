@@ -534,6 +534,18 @@ body {
   font-size: 0.84rem;
 }
 
+/* HTTP verb chip. Monospace and fixed-width so a column of routes lines up
+   and scans as a table rather than as prose. */
+.explain-method {
+  display: inline-block;
+  min-width: 3.6rem;
+  margin-right: 0.55rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  color: #7dd3fc;
+}
+
 .explain-note-inline {
   margin-top: 0.55rem;
   font-size: 0.75rem;

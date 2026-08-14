@@ -128,7 +128,16 @@ export interface Explanation {
     co_changes: CoChangePartner[];
     tested_by: TestFile[];
     ownership: Ownership | null;
+    endpoints: EndpointRef[];
   };
+}
+
+/** An HTTP route a change to this node would reach. */
+export interface EndpointRef {
+  file_path: string | null;
+  id: string;
+  method: string;
+  path: string;
 }
 
 /** A test file that imports this one. `named_for_it` means the names match

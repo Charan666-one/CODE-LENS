@@ -11,6 +11,7 @@ from app.queries import (  # noqa: F401  (imported for their @register side effe
     centrality,
     coupling,
     dependencies,
+    endpoints,
     explain,
     quality,
     risk,
