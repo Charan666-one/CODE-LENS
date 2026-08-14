@@ -9,6 +9,7 @@ from __future__ import annotations
 from app.queries import (  # noqa: F401  (imported for their @register side effect)
     blast_radius,
     centrality,
+    coupling,
     dependencies,
     explain,
     risk,

@@ -25,10 +25,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+from app.graph.co_change import co_change_edges
 from app.graph.schema import KnowledgeGraph, NodeKind
 from app.graph.store import GraphStore
 from app.ingestion import IngestedRepo, ingest
-from app.ingestion.git_history import apply_history, collect_history
+from app.ingestion.git_history import apply_history, histories_from_commits, read_log
 from app.parser import PARSED_EXTENSIONS, parse_ingested
 
 
@@ -102,9 +103,13 @@ def run_pipeline(
 
     # Stage 3 — metrics: the git-lite temporal pass (CP-1.5). Fact source is
     # git history, so it lives outside the parser (which only reads the AST).
+    # One log read, two derived facts: per-file churn, and the co-change
+    # coupling that only whole-commit file sets can reveal.
     started = time.monotonic()
-    histories = collect_history(ingested.root)
-    apply_history(graph.nodes, histories)
+    commits = read_log(ingested.root)
+    apply_history(graph.nodes, histories_from_commits(commits))
+    coupling, _ = co_change_edges(commits, graph.nodes)
+    graph.edges.extend(coupling)
     report(Stage.METRICS, time.monotonic() - started, False)
 
     # Stage 4 — graph_built (persisted; a graph that only lives in RAM isn't built).

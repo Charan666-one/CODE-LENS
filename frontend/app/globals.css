@@ -502,6 +502,30 @@ body {
 
 .explain-name { word-break: break-all; }
 
+/* Co-change coupling. The `hidden` flag is the one thing on this panel that
+   is a finding rather than a fact about structure, so it gets the only
+   warning-coloured chip in the page — used once, it still means something. */
+.explain-flag {
+  display: inline-block;
+  margin-right: 0.45rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background: rgba(251, 191, 36, 0.16);
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  color: #fcd34d;
+  font-size: 0.64rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  vertical-align: 1px;
+}
+
+.explain-note-inline {
+  margin-top: 0.55rem;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
 .explain-meta {
   font-size: 0.7rem;
   color: var(--muted);

@@ -38,6 +38,7 @@ class GraphView:
                 confidence=edge.confidence,
                 file_path=edge.file_path,
                 line=edge.line,
+                weight=edge.weight,
             )
 
     # ── basics ────────────────────────────────────────────────────────────

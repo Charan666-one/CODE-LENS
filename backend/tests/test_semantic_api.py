@@ -86,7 +86,22 @@ def test_concept_search_needs_no_llm(client: TestClient) -> None:
 # ── narrated: honest 503 without a key ────────────────────────────────────
 
 
-def test_narrated_answers_503_cleanly_without_key(client: TestClient) -> None:
+def test_narrated_answers_503_cleanly_without_key(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unconfigured path, forced rather than assumed.
+
+    This test used to rely on the developer's machine having no API key —
+    which stopped being true the moment one was added, and the suite went
+    red for a reason that had nothing to do with the code. A test about the
+    absence of configuration has to create that absence itself.
+    """
+    from app.core.config import settings
+
+    for key in ("GROQ_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.setattr(settings, key, None)
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "auto")
+
     snapshot_id = analyze_fixture(client)
     response = client.post(f"/api/repos/{snapshot_id}/answers/project")
     assert response.status_code == 503

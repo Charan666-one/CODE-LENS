@@ -5,7 +5,7 @@ That constraint is load-bearing: this package must stay importable and fully
 testable with no LLM key, no database, and no network (for local sources).
 
 Accepted sources:
-  * an https GitHub URL  -> shallow clone (depth 1, timeout-guarded)
+  * an https GitHub URL  -> blobless clone, bounded history (timeout-guarded)
   * a local .zip archive -> extracted with path-traversal protection
   * a local directory    -> analysed in place, never mutated
 """

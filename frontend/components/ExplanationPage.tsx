@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { useGraphStore } from "@/lib/store";
+import type { CoChangePartner } from "@/lib/types";
 
 /** The explanation page: why the project needs this file or folder.
  *
@@ -126,6 +127,11 @@ export default function ExplanationPage() {
               </section>
             )}
 
+            <CoChanges
+              partners={explanation.meta.co_changes ?? []}
+              onOpen={openExplanation}
+            />
+
             {Object.keys(explanation.paths).length > 0 && (
               <section className="explain-section">
                 <h2>
@@ -180,6 +186,60 @@ function Stat({
       <dd>{value}</dd>
       {hint && <span>{hint}</span>}
     </div>
+  );
+}
+
+/** What history says travels with this file.
+ *
+ *  The section only appears when there is something to say, and it leads with
+ *  the undeclared partners — a file that also imports this one co-changing
+ *  with it is unremarkable, while one that does not is the finding. The
+ *  wording stays literal about what the evidence is (commits) so nobody reads
+ *  a correlation as a call.
+ */
+function CoChanges({
+  partners,
+  onOpen,
+}: {
+  partners: CoChangePartner[];
+  onOpen: (id: string) => void;
+}) {
+  if (partners.length === 0) return null;
+  const hiddenCount = partners.filter((p) => p.hidden).length;
+
+  return (
+    <section className="explain-section">
+      <h2>
+        Changes together with{" "}
+        <span className="explain-counts">
+          {hiddenCount > 0
+            ? `${hiddenCount} with no import between them`
+            : "all declared in code"}
+        </span>
+      </h2>
+      <ul className="explain-list">
+        {partners.map((partner) => (
+          <li key={partner.id}>
+            <button onClick={() => onOpen(partner.id)}>
+              <span className="explain-name">
+                {partner.hidden && <span className="explain-flag">hidden</span>}
+                {partner.name}
+              </span>
+              <span className="explain-meta">
+                {Math.round(partner.strength * 100)}% of changes
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      {hiddenCount > 0 && (
+        <p className="explain-note-inline">
+          Nothing in the code connects the files marked hidden — yet they keep
+          changing in the same commits. Usually a shared format, a duplicated
+          rule, or an invariant only one person remembers.
+        </p>
+      )}
+    </section>
   );
 }
 

@@ -120,8 +120,48 @@ def explain(view: GraphView, *, node_id: str) -> ResultGraph:
             "depends_on": _summarise(view, depends_on),
             "used_by": _summarise(view, used_by),
             "contains": _contains_summary(view, node, members),
+            "co_changes": _co_change_summary(view, scope),
         },
     )
+
+
+def _co_change_summary(view: GraphView, scope: set[str]) -> list[dict[str, Any]]:
+    """What history says travels with this, and whether the code admits it.
+
+    The `hidden` flag is the whole point: a partner that also imports this
+    file is unremarkable, while one that does not is a finding.
+    """
+    from app.queries.coupling import _declared_file_pairs, _pair
+
+    declared = _declared_file_pairs(view)
+    partners: list[dict[str, Any]] = []
+    for source, target, attributes in view.g.edges(data=True):
+        if attributes["kind"] is not EdgeKind.CO_CHANGES:
+            continue
+        if source in scope:
+            mine_id, other_id = source, target
+        elif target in scope:
+            mine_id, other_id = target, source
+        else:
+            continue
+        other = view.node(other_id)
+        if other is None or other_id in scope:
+            continue
+        partners.append(
+            {
+                "id": other.id,
+                "name": other.name,
+                "file_path": other.file_path,
+                "strength": attributes.get("weight") or 0.0,
+                # Compare the *file* that co-changed, not the thing being
+                # explained: for a folder those differ, and asking whether a
+                # module imports a file would always answer "no".
+                "hidden": _pair(mine_id, other_id) not in declared,
+            }
+        )
+    # Hidden partners first — they are the ones worth a reader's attention.
+    partners.sort(key=lambda p: (not p["hidden"], -p["strength"], p["id"]))
+    return partners[:_TOP_NEIGHBOURS]
 
 
 def _members_of(view: GraphView, node: Any) -> set[str]:

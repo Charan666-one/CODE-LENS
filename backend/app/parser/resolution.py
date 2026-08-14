@@ -83,6 +83,14 @@ def _is_bettable(name: str) -> bool:
     return name not in _GENERIC_METHOD_NAMES
 
 
+#: A module name must have at least this many segments before the suffix
+#: fallback will consider it. Single-segment names (`json`, `os`, `types`) are
+#: overwhelmingly stdlib or third-party, and a repo that happens to contain a
+#: `vendor/json.py` must not have every `import json` in the tree pointed at
+#: it. Two segments is where a name starts describing a project's own layout.
+_MIN_SUFFIX_SEGMENTS = 2
+
+
 class SymbolTable:
     """Everything known about the repository once every file has been walked."""
 
@@ -98,6 +106,7 @@ class SymbolTable:
                 self.modules.setdefault(f.module_qname[: -len(".index")], f.path)
         self.file_ids: dict[str, str] = {f.path: f.file_node.id for f in facts}
         self._qname_by_path: dict[str, str] = {f.path: f.module_qname for f in facts}
+        self._init_suffix_index()
         self.functions: dict[str, str] = {}
         self.classes: dict[str, str] = {}
         for file_facts in facts:
@@ -108,11 +117,58 @@ class SymbolTable:
                     self.classes.setdefault(node.qualified_name, node.id)
         self._init_methods_index(facts)
 
-    def canonical_module(self, module_qname: str) -> str:
-        """The real qname of the file a module name lands on. Identity for
-        Python; for JS it maps an aliased `store` to `store.index`, so that
-        symbol candidates are built against names that actually exist."""
+    def _init_suffix_index(self) -> None:
+        """Index every module by each trailing part of its name.
+
+        Module names here are derived from the path relative to the *analysis
+        root*, but import statements are written relative to the language's
+        own source root, and those are rarely the same directory. `backend/`,
+        `src/`, `packages/core/src/`, a Next.js `@/` alias — each puts the
+        code one or more levels below where imports start counting from.
+
+        Without this, analysing a repo at its root instead of at its source
+        directory silently loses almost every import edge: CodeLens's own
+        tree went from 179 IMPORTS to 5, and nothing anywhere said so. That is
+        the worst class of bug this project can have, because a graph missing
+        its edges still looks like a graph.
+
+        Ambiguous suffixes resolve to nothing. If two files could both answer
+        to `utils.helpers`, guessing between them would trade a missing edge
+        for a wrong one, and a wrong edge is the more expensive mistake.
+        """
+        counts: dict[str, list[str]] = {}
+        for qname, path in self.modules.items():
+            segments = qname.split(".")
+            # Every proper suffix; the full name is already an exact key.
+            for start in range(1, len(segments)):
+                suffix = ".".join(segments[start:])
+                if suffix.count(".") + 1 < _MIN_SUFFIX_SEGMENTS:
+                    continue
+                counts.setdefault(suffix, []).append(path)
+
+        self._by_suffix: dict[str, str] = {
+            suffix: paths[0]
+            for suffix, paths in counts.items()
+            if len(set(paths)) == 1 and suffix not in self.modules
+        }
+
+    def module_path(self, module_qname: str) -> str | None:
+        """The file a module name lands on: exact match, else unique suffix."""
         path = self.modules.get(module_qname)
+        if path is not None:
+            return path
+        return self._by_suffix.get(module_qname)
+
+    def canonical_module(self, module_qname: str) -> str:
+        """The real qname of the file a module name lands on.
+
+        Identity when the name is already the file's own; otherwise the name
+        the file actually carries — `store` -> `store.index` for JS, and
+        `app.parser.resolution` -> `backend.app.parser.resolution` when the
+        analysis root sits above the source root. Callers build symbol
+        candidates from the result, so it must be a name that exists.
+        """
+        path = self.module_path(module_qname)
         if path is None:
             return module_qname
         return self._qname_by_path.get(path, module_qname)
@@ -207,7 +263,7 @@ def _build_import_map(facts: FileFacts, table: SymbolTable, emit: EmitEdge) -> I
         _emit_import_edge(facts, table, target_module, raw.line, emit)
         for original, alias in raw.names:
             candidate = f"{target_module}.{original}" if target_module else original
-            is_module = candidate in table.modules
+            is_module = table.module_path(candidate) is not None
             import_map[alias] = (candidate, is_module)
             if is_module:
                 # `from package import submodule` depends on the submodule's file
@@ -239,7 +295,7 @@ def _relative_base(module_qname: str, is_package: bool, level: int) -> str:
 def _emit_import_edge(
     facts: FileFacts, table: SymbolTable, module_qname: str, line: int, emit: EmitEdge
 ) -> None:
-    path = table.modules.get(module_qname)
+    path = table.module_path(module_qname)
     if path is None:  # third-party or stdlib: Layer B, not Layer A
         return
     target_id = table.file_ids[path]

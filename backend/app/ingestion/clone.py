@@ -57,8 +57,29 @@ def normalize_repo_url(url: str) -> str:
     return f"https://github.com/{owner}/{repo}"
 
 
+#: How many commits of history to fetch. Depth 1 — the obvious choice, and
+#: what this used to do — makes the entire temporal layer a no-op: every file
+#: has churn 1, no file has co-changed with any other, and nothing says so.
+#: The map just quietly loses a dimension.
+#:
+#: `--filter=blob:none` is what makes real history affordable. It fetches all
+#: commits and trees but no file contents, so the log is complete while the
+#: download stays close to a shallow clone (Flask: 1.4s/3.3MB at depth 1,
+#: 2.6s/4.7MB at depth 400). Blobs for the checked-out commit are fetched on
+#: demand, which is exactly the working tree the parser reads.
+#:
+#: The hard constraint this creates: history may only be read with commands
+#: that need trees, never blobs. `git log --name-only` qualifies;
+#: `--numstat` does not, and running it here hangs for minutes lazily
+#: refetching every blob in the repository. See git_history.py.
+HISTORY_DEPTH = 400
+
+
 def shallow_clone(url: str, dest: Path, timeout_seconds: int) -> Path:
-    """Clone `url` into `dest` at depth 1. Raises on timeout or git failure."""
+    """Clone `url` into `dest` with bounded, blobless history.
+
+    Raises on timeout or git failure.
+    """
     canonical = normalize_repo_url(url)
     dest = dest.resolve()
     if dest.exists():
@@ -69,7 +90,8 @@ def shallow_clone(url: str, dest: Path, timeout_seconds: int) -> Path:
         "git",
         "clone",
         "--depth",
-        "1",
+        str(HISTORY_DEPTH),
+        "--filter=blob:none",
         "--single-branch",
         "--no-tags",
         "--quiet",

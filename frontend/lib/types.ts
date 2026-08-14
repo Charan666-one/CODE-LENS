@@ -125,7 +125,21 @@ export interface Explanation {
         start_line: number | null;
       }[];
     };
+    co_changes: CoChangePartner[];
   };
+}
+
+/** A file that history says travels with this one.
+ *
+ * `hidden` is the interesting bit: no import, no call, yet they keep shipping
+ * together. `strength` is the share of commits touching either file that
+ * touched both. */
+export interface CoChangePartner {
+  id: string;
+  name: string;
+  file_path: string | null;
+  strength: number;
+  hidden: boolean;
 }
 
 /** The blast_radius ResultGraph — the facts the ripple animates. */
