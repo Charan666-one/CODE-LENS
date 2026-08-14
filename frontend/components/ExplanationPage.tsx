@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 import { useGraphStore } from "@/lib/store";
-import type { CoChangePartner } from "@/lib/types";
+import type { CoChangePartner, Ownership as OwnershipFacts, TestFile } from "@/lib/types";
 
 /** The explanation page: why the project needs this file or folder.
  *
@@ -127,6 +127,14 @@ export default function ExplanationPage() {
               </section>
             )}
 
+            <Coverage
+              tests={explanation.meta.tested_by ?? []}
+              isTestFile={identity.file_path?.includes("test") ?? false}
+              onOpen={openExplanation}
+            />
+
+            <Ownership ownership={explanation.meta.ownership ?? null} />
+
             <CoChanges
               partners={explanation.meta.co_changes ?? []}
               onOpen={openExplanation}
@@ -186,6 +194,98 @@ function Stat({
       <dd>{value}</dd>
       {hint && <span>{hint}</span>}
     </div>
+  );
+}
+
+/** Which tests reach this file — and the honest version of "none".
+ *
+ *  The empty case is the whole reason this section exists, so it renders
+ *  rather than disappearing. It says what was actually checked (no test file
+ *  imports this) instead of the stronger thing a reader might hear
+ *  ("untested"), because an import graph cannot see a test that exercises
+ *  code without importing it.
+ */
+function Coverage({
+  tests,
+  isTestFile,
+  onOpen,
+}: {
+  tests: TestFile[];
+  isTestFile: boolean;
+  onOpen: (id: string) => void;
+}) {
+  if (isTestFile) return null; // "is this test tested?" is not a question
+
+  return (
+    <section className="explain-section">
+      <h2>
+        Tested by{" "}
+        <span className="explain-counts">
+          {tests.length === 0 ? "nothing imports this in a test" : `${tests.length} test file${tests.length === 1 ? "" : "s"}`}
+        </span>
+      </h2>
+      {tests.length === 0 ? (
+        <p className="explain-empty">
+          No test file imports this. That is not proof it is untested — a test
+          can exercise code without importing it — but nothing here reaches it.
+        </p>
+      ) : (
+        <ul className="explain-list">
+          {tests.map((test) => (
+            <li key={test.id}>
+              <button onClick={() => onOpen(test.id)}>
+                <span className="explain-name">{test.name}</span>
+                <span className="explain-meta">
+                  {test.named_for_it ? "named for it" : "imports it"}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/** Who knows this code. The finding is concentration, not identity. */
+function Ownership({ ownership }: { ownership: OwnershipFacts | null }) {
+  if (!ownership) return null;
+
+  return (
+    <section className="explain-section">
+      <h2>
+        Who works on this{" "}
+        <span className="explain-counts">
+          {ownership.bus_factor_one
+            ? "one person, effectively"
+            : `${ownership.authors.length} contributor${ownership.authors.length === 1 ? "" : "s"}`}
+        </span>
+      </h2>
+      <ul className="explain-list">
+        {ownership.authors.map((author) => (
+          <li key={author.name}>
+            <div className="explain-static">
+              <span className="explain-name">
+                {ownership.bus_factor_one && author.name === ownership.primary && (
+                  <span className="explain-flag">bus factor 1</span>
+                )}
+                {author.name}
+              </span>
+              <span className="explain-meta">
+                {Math.round(author.share * 100)}% of commits
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
+      {ownership.bus_factor_one && (
+        <p className="explain-note-inline">
+          {ownership.primary} wrote {Math.round(ownership.primary_share * 100)}% of
+          the commits here. If that knowledge is only in one head, this is where
+          it hurts. Measured over the history that was cloned, not all time.
+        </p>
+      )}
+    </section>
   );
 }
 

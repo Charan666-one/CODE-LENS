@@ -53,11 +53,17 @@ class Commit:
 
     `files` are repo-relative paths in the same coordinate system as the
     graph — the caller never has to think about git's top-level prefix.
+
+    `author` is the email, used only as an identity key: it distinguishes
+    people, and two commits by the same person under different display names
+    still merge. `display_name` is what may be shown. The graph stores a
+    digest of the former (see graph/ownership.py), never the address itself.
     """
 
     author: str
     date: str  # ISO
     files: tuple[str, ...]
+    display_name: str = ""
 
 
 def read_log(root: Path, timeout_seconds: int = 60) -> list[Commit]:
@@ -84,18 +90,27 @@ def read_log(root: Path, timeout_seconds: int = 60) -> list[Commit]:
 
     commits: list[Commit] = []
     author = ""
+    display_name = ""
     date = ""
     files: list[str] = []
 
     def flush() -> None:
         if files:
-            commits.append(Commit(author=author, date=date, files=tuple(files)))
+            commits.append(
+                Commit(
+                    author=author,
+                    date=date,
+                    files=tuple(files),
+                    display_name=display_name,
+                )
+            )
 
     for line in output.splitlines():
-        if line.startswith("\x01"):  # commit header: \x01<email>|<iso date>
+        if line.startswith("\x01"):  # header: \x01<email>|<name>|<iso date>
             flush()
             files = []
-            author, _, date = line[1:].partition("|")
+            author, _, rest = line[1:].partition("|")
+            display_name, _, date = rest.partition("|")
             continue
         if not line.strip():
             continue
@@ -177,7 +192,7 @@ def _run_git_log(root: Path, timeout_seconds: int) -> str | None:
                 str(root),
                 "log",
                 "--no-merges",
-                "--format=%x01%aE|%aI",
+                "--format=%x01%aE|%aN|%aI",
                 # `--name-only`, never `--numstat`. Clones are blobless
                 # (clone.py `--filter=blob:none`), and numstat needs file
                 # *contents* to count changed lines, so it would lazily

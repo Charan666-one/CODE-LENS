@@ -24,7 +24,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.graph.schema import EdgeKind, NodeKind
+from app.graph.ownership import BUS_FACTOR_ONE_SHARE
+from app.graph.schema import CallConfidence, EdgeKind, NodeKind
 from app.graph.traversal import GraphView
 from app.queries.base import QueryError, RankedNode, ResultGraph, register
 
@@ -121,8 +122,77 @@ def explain(view: GraphView, *, node_id: str) -> ResultGraph:
             "used_by": _summarise(view, used_by),
             "contains": _contains_summary(view, node, members),
             "co_changes": _co_change_summary(view, scope),
+            "tested_by": _tested_by(view, scope),
+            "ownership": _ownership(view, node, scope),
         },
     )
+
+
+def _tested_by(view: GraphView, scope: set[str]) -> list[dict[str, Any]]:
+    """The test files that import this. Empty is a real answer, not a gap in
+    the data — it means no test reaches here by import."""
+    found: list[dict[str, Any]] = []
+    for source, target, attributes in view.g.edges(data=True):
+        if attributes["kind"] is not EdgeKind.TESTS or target not in scope:
+            continue
+        test_file = view.node(source)
+        if test_file is None:
+            continue
+        found.append(
+            {
+                "id": test_file.id,
+                "name": test_file.name,
+                "file_path": test_file.file_path,
+                # A name match ("test_views tests views") is a stronger claim
+                # than "a test happened to import this".
+                "named_for_it": attributes["confidence"] is CallConfidence.RESOLVED,
+            }
+        )
+    found.sort(key=lambda t: (not t["named_for_it"], t["id"]))
+    return found[:_TOP_NEIGHBOURS]
+
+
+def _ownership(view: GraphView, node: Any, scope: set[str]) -> dict[str, Any] | None:
+    """Who has actually worked on this, and how concentrated that is.
+
+    For a folder the shares are aggregated across its files, weighted by each
+    file's commit count — otherwise a one-commit file would count as much as
+    the module's busiest.
+    """
+    shares: dict[str, float] = {}
+    weight_total = 0.0
+    for member_id in scope:
+        member = view.node(member_id)
+        if member is None or member.kind is not NodeKind.FILE:
+            continue
+        commits = float(member.churn_count or 0)
+        if commits <= 0:
+            continue
+        weight_total += commits
+        for _, author_id, attributes in view.g.out_edges(member_id, data=True):
+            if attributes["kind"] is not EdgeKind.AUTHORED_BY:
+                continue
+            author = view.node(author_id)
+            if author is None:
+                continue
+            shares[author.name] = shares.get(author.name, 0.0) + commits * (
+                attributes.get("weight") or 0.0
+            )
+
+    if not shares or weight_total <= 0:
+        return None
+    ranked = sorted(shares.items(), key=lambda kv: (-kv[1], kv[0]))
+    top_name, top_weight = ranked[0]
+    top_share = top_weight / weight_total
+    return {
+        "authors": [
+            {"name": name, "share": round(weight / weight_total, 3)}
+            for name, weight in ranked[:_TOP_NEIGHBOURS]
+        ],
+        "primary": top_name,
+        "primary_share": round(top_share, 3),
+        "bus_factor_one": top_share >= BUS_FACTOR_ONE_SHARE,
+    }
 
 
 def _co_change_summary(view: GraphView, scope: set[str]) -> list[dict[str, Any]]:

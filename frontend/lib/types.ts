@@ -126,7 +126,26 @@ export interface Explanation {
       }[];
     };
     co_changes: CoChangePartner[];
+    tested_by: TestFile[];
+    ownership: Ownership | null;
   };
+}
+
+/** A test file that imports this one. `named_for_it` means the names match
+ *  (`test_views.py` / `views.py`) — intent, not just a dependency. */
+export interface TestFile {
+  id: string;
+  name: string;
+  file_path: string | null;
+  named_for_it: boolean;
+}
+
+/** Who has worked on this, over the history that was cloned. */
+export interface Ownership {
+  authors: { name: string; share: number }[];
+  primary: string;
+  primary_share: number;
+  bus_factor_one: boolean;
 }
 
 /** A file that history says travels with this one.

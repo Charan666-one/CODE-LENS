@@ -12,6 +12,7 @@ from app.queries import (  # noqa: F401  (imported for their @register side effe
     coupling,
     dependencies,
     explain,
+    quality,
     risk,
     structure,
 )

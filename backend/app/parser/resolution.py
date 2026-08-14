@@ -23,6 +23,7 @@ ones: calls need the class hierarchy, which needs import maps.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 
 from app.graph.schema import CallConfidence, Edge, EdgeKind, EntrypointKind, Node, NodeKind
@@ -83,12 +84,32 @@ def _is_bettable(name: str) -> bool:
     return name not in _GENERIC_METHOD_NAMES
 
 
-#: A module name must have at least this many segments before the suffix
-#: fallback will consider it. Single-segment names (`json`, `os`, `types`) are
-#: overwhelmingly stdlib or third-party, and a repo that happens to contain a
-#: `vendor/json.py` must not have every `import json` in the tree pointed at
-#: it. Two segments is where a name starts describing a project's own layout.
+#: A dotted module name is specific enough to match on its own. A *bare* one
+#: is not: `json`, `types`, and `logging` are stdlib far more often than they
+#: are a repository's own top-level package, and a repo containing
+#: `vendor/json.py` must not capture every `import json` in the tree.
 _MIN_SUFFIX_SEGMENTS = 2
+
+#: The exception that makes `src/` layouts work. `import flask` inside the
+#: Flask repository does mean `src/flask/__init__.py`, and refusing it left
+#: the most-imported file in the project with no incoming edges at all.
+#: A bare name is therefore allowed to match when both hold:
+#:   * the file it would match is a *package root* — `__init__.py` or
+#:     `index.ts` — so the name really is a package, not a stray module, and
+#:   * the name is not a standard-library module.
+#: `sys.stdlib_module_names` is the authoritative list, so this needs no
+#: hand-maintained denylist that would rot with each Python release.
+_PACKAGE_ROOT_FILES = (
+    "__init__.py",
+    "__init__.pyi",
+    "index.js",
+    "index.jsx",
+    "index.mjs",
+    "index.cjs",
+    "index.ts",
+    "index.tsx",
+)
+_STDLIB_NAMES = frozenset(sys.stdlib_module_names)
 
 
 class SymbolTable:
@@ -139,10 +160,13 @@ class SymbolTable:
         counts: dict[str, list[str]] = {}
         for qname, path in self.modules.items():
             segments = qname.split(".")
+            is_package_root = path.endswith(_PACKAGE_ROOT_FILES)
             # Every proper suffix; the full name is already an exact key.
             for start in range(1, len(segments)):
                 suffix = ".".join(segments[start:])
-                if suffix.count(".") + 1 < _MIN_SUFFIX_SEGMENTS:
+                if suffix.count(".") + 1 < _MIN_SUFFIX_SEGMENTS and not (
+                    is_package_root and suffix not in _STDLIB_NAMES
+                ):
                     continue
                 counts.setdefault(suffix, []).append(path)
 

@@ -26,6 +26,8 @@ from enum import Enum
 from pathlib import Path
 
 from app.graph.co_change import co_change_edges
+from app.graph.coverage import link_tests
+from app.graph.ownership import ownership
 from app.graph.schema import KnowledgeGraph, NodeKind
 from app.graph.store import GraphStore
 from app.ingestion import IngestedRepo, ingest
@@ -110,6 +112,13 @@ def run_pipeline(
     apply_history(graph.nodes, histories_from_commits(commits))
     coupling, _ = co_change_edges(commits, graph.nodes)
     graph.edges.extend(coupling)
+    author_nodes, authored_by = ownership(commits, graph.nodes)
+    graph.nodes.extend(author_nodes)
+    graph.edges.extend(authored_by)
+    # TESTS reads the resolved IMPORTS edges, so it runs after parsing; it
+    # needs no history, and is here only because this is where derived edges
+    # are added rather than for any dependency on git.
+    graph.edges.extend(link_tests(graph.nodes, graph.edges))
     report(Stage.METRICS, time.monotonic() - started, False)
 
     # Stage 4 — graph_built (persisted; a graph that only lives in RAM isn't built).
