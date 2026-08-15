@@ -170,6 +170,22 @@ export interface CoChangePartner {
   hidden: boolean;
 }
 
+/** The shape every query plan returns (backend `ResultGraph`).
+ *
+ *  `meta` is deliberately loose: each plan puts its own findings there, and
+ *  the alternative — a union of eleven shapes that must be edited whenever a
+ *  plan is registered — would defeat the point of a generic runner. Callers
+ *  narrow it at the point of use. */
+export interface QueryResult {
+  query: string;
+  params: Record<string, unknown>;
+  focus_id: string | null;
+  node_ids: string[];
+  ranked: { node_id: string; score: number; reasons: Record<string, unknown> }[];
+  paths: Record<string, string[]>;
+  meta: Record<string, unknown>;
+}
+
 /** The blast_radius ResultGraph — the facts the ripple animates. */
 export interface BlastResult {
   focus_id: string;

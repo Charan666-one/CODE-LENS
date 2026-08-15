@@ -1,4 +1,10 @@
-import type { AnalyzeResponse, BlastResult, Explanation, ViewSpec } from "./types";
+import type {
+  AnalyzeResponse,
+  BlastResult,
+  Explanation,
+  QueryResult,
+  ViewSpec,
+} from "./types";
 
 /** Thin fetchers. Components never call fetch directly — they read the
  *  store, and the store calls these. */
@@ -77,16 +83,53 @@ export async function fetchExplanation(
   return response.json();
 }
 
-export async function fetchBlastRadius(
+/** Run any registered query plan.
+ *
+ *  The backend registry holds eleven plans and this file used to reach three,
+ *  so `risk`, `centrality`, `dependencies`, `entrypoints`, `modules`,
+ *  `hidden_coupling`, `untested_hubs`, `bus_factor` and `endpoints` all
+ *  worked, were tested, and could not be seen. One generic caller is the whole
+ *  fix: the endpoint has always been generic
+ *  (`POST /repos/{id}/query/{name}`) — only the client was not.
+ *
+ *  Registering a plan on the backend now makes it reachable here with no
+ *  frontend change, which is the property the registry was designed for.
+ */
+export async function runQuery<T = QueryResult>(
   snapshotId: number,
-  nodeId: string,
-): Promise<BlastResult> {
+  name: string,
+  params: Record<string, unknown> = {},
+): Promise<T> {
   const response = await expectOk(
-    await fetch(`/api/repos/${snapshotId}/query/blast_radius`, {
+    await fetch(`/api/repos/${snapshotId}/query/${name}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       cache: "no-store",
-      body: JSON.stringify({ params: { node_id: nodeId } }),
+      body: JSON.stringify({ params }),
+    }),
+  );
+  return response.json();
+}
+
+export function fetchBlastRadius(
+  snapshotId: number,
+  nodeId: string,
+): Promise<BlastResult> {
+  return runQuery<BlastResult>(snapshotId, "blast_radius", { node_id: nodeId });
+}
+
+/** Concept search — deterministic, no API key, already on the backend. */
+export async function searchRepo(
+  snapshotId: number,
+  text: string,
+  top = 12,
+): Promise<QueryResult> {
+  const response = await expectOk(
+    await fetch(`/api/repos/${snapshotId}/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      body: JSON.stringify({ text, top }),
     }),
   );
   return response.json();

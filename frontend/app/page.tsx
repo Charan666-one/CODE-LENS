@@ -3,12 +3,14 @@
 import dynamic from "next/dynamic";
 import HeroInput from "@/components/HeroInput";
 import HUD from "@/components/HUD";
-import ExplanationPage from "@/components/ExplanationPage";
+import NodeInspector from "@/components/NodeInspector";
 import UnderstandingOverlay from "@/components/UnderstandingOverlay";
 
 // Sigma needs the browser's WebGL context; never render it on the server.
 const GraphCanvas = dynamic(() => import("@/components/GraphCanvas"), { ssr: false });
 
+/** One canvas. The graph fills the stage; everything else floats over it and
+ *  only when it has something to say. */
 export default function Home() {
   return (
     <main className="stage">
@@ -16,7 +18,7 @@ export default function Home() {
       <HeroInput />
       <UnderstandingOverlay />
       <HUD />
-      <ExplanationPage />
+      <NodeInspector />
     </main>
   );
 }

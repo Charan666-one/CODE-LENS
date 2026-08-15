@@ -284,319 +284,246 @@ button {
   border-color: var(--accent);
 }
 
-/* ── the node card (superseded by the inspector; kept until it lands) ─── */
+/* ── the bottom readout ──────────────────────────────────────────────── */
+/* One line. Where you are, or what you are focused on — never both. */
 
-.node-card {
+.hud-bottom {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: var(--s3) var(--s4);
+  z-index: 5;
+  text-align: center;
+  font-size: var(--text-meta);
+  color: var(--muted);
+  background: linear-gradient(to top, rgba(6, 10, 19, 0.9), transparent);
+  pointer-events: none;
+}
+
+.hud-level,
+.hud-focus {
+  color: var(--text);
+  letter-spacing: 0.06em;
+}
+
+.hud-focus {
+  color: var(--accent);
+}
+
+.hud-hint {
+  opacity: 0.7;
+}
+
+/* ── the inspector ───────────────────────────────────────────────────── */
+/* One floating panel, never full height, never behind a scrim. It replaced a
+   corner card AND a 560px slide-over that between them could hide the graph
+   the answer was about. */
+
+.inspector {
   position: absolute;
   right: var(--s4);
   top: var(--s6);
-  width: 280px;
+  width: 300px;
+  max-height: calc(100vh - var(--s6) * 3);
+  overflow-y: auto;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   padding: var(--s4);
-  z-index: 5;
+  z-index: 6;
   backdrop-filter: blur(8px);
   box-shadow: var(--shadow);
 }
 
-.node-kind {
+.inspector-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--s2);
+}
+
+.inspector-kind {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   font-size: var(--text-meta);
   color: var(--muted);
 }
 
-.node-name {
+.inspector-head h2 {
   font-size: var(--text-label);
   font-weight: var(--weight-strong);
-  margin: var(--s1) 0 var(--s3);
+  margin-top: var(--s1);
   word-break: break-all;
 }
 
-.node-card dl {
-  display: flex;
-  gap: var(--s5);
-  margin-bottom: var(--s3);
-}
-
-.node-card dt {
-  font-size: var(--text-meta);
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-.node-card dd {
-  font-size: var(--text-label);
-  color: var(--text);
-}
-
-.node-evidence {
-  font-family: var(--mono);
-  font-size: var(--text-meta);
-  color: var(--accent);
-  margin-bottom: var(--s2);
-  word-break: break-all;
-}
-
-.node-hint {
-  font-size: var(--text-meta);
-  color: var(--muted);
-}
-
-/* ── impact (blast radius) ───────────────────────────────────────────── */
-
-.ripple-trigger {
-  margin-top: var(--s2);
-  width: 100%;
-  padding: var(--s2) var(--s3);
-  border-radius: var(--r-md);
-  border: 1px solid rgba(251, 146, 60, 0.35);
-  background: rgba(251, 146, 60, 0.08);
-  color: var(--impact);
-  font-size: var(--text-ui);
-  font-weight: var(--weight-strong);
-  cursor: pointer;
-}
-
-.ripple-trigger:hover {
-  background: rgba(251, 146, 60, 0.16);
-}
-
-.ripple-readout {
-  margin-top: var(--s2);
-  border-top: 1px solid var(--line);
-  padding-top: var(--s3);
-}
-
-.ripple-count {
-  font-size: var(--text-body);
-  color: var(--impact);
-  margin-bottom: var(--s2);
-}
-
-.ripple-count strong {
-  font-size: var(--text-label);
-  color: var(--impact);
-}
-
-.ripple-clear {
-  margin-top: var(--s2);
+.inspector-close {
   background: transparent;
   border: 1px solid var(--line);
   color: var(--muted);
   border-radius: var(--r-sm);
-  padding: var(--s1) var(--s3);
-  font-size: var(--text-meta);
-  cursor: pointer;
-}
-
-.ripple-clear:hover {
-  color: var(--text);
-  border-color: var(--line-strong);
-}
-
-/* ── the explanation surface ─────────────────────────────────────────── */
-
-.explain-trigger {
-  margin-top: var(--s2);
-  width: 100%;
-  padding: var(--s2) var(--s3);
-  border-radius: var(--r-md);
-  border: 1px solid rgba(125, 211, 252, 0.35);
-  background: rgba(125, 211, 252, 0.1);
-  color: var(--accent);
-  font-size: var(--text-ui);
-  font-weight: var(--weight-strong);
-  cursor: pointer;
-}
-
-.explain-trigger:hover {
-  background: rgba(125, 211, 252, 0.2);
-}
-
-.explain-scrim {
-  position: absolute;
-  inset: 0;
-  z-index: 20;
-  background: rgba(3, 6, 12, 0.72);
-  backdrop-filter: blur(3px);
-  display: flex;
-  justify-content: flex-end;
-}
-
-.explain-page {
-  width: min(560px, 94vw);
-  height: 100%;
-  overflow-y: auto;
-  background: #070c16;
-  border-left: 1px solid var(--line);
-  padding: var(--s5) var(--s5) var(--s6);
-}
-
-.explain-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: var(--s4);
-  margin-bottom: var(--s4);
-}
-
-.explain-kind {
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  font-size: var(--text-meta);
-  color: var(--muted);
-}
-
-.explain-head h1 {
-  font-size: var(--text-title);
-  font-weight: var(--weight-strong);
-  letter-spacing: -0.02em;
-  margin: var(--s1) 0;
-  word-break: break-word;
-}
-
-.explain-path {
-  font-family: var(--mono);
-  font-size: var(--text-meta);
-  color: var(--accent);
-  word-break: break-all;
-}
-
-.explain-close {
-  background: transparent;
-  border: 1px solid var(--line);
-  color: var(--muted);
-  border-radius: var(--r-sm);
-  width: 30px;
-  height: 30px;
-  cursor: pointer;
+  width: 24px;
+  height: 24px;
   flex-shrink: 0;
+  cursor: pointer;
 }
 
-.explain-close:hover {
+.inspector-close:hover {
   color: var(--text);
   border-color: var(--line-strong);
 }
 
-.explain-verdict {
-  font-size: var(--text-body);
-  line-height: 1.5;
-  color: var(--text);
-  border-left: 2px solid var(--accent);
-  padding-left: var(--s3);
-  margin-bottom: var(--s4);
+.inspector-path {
+  font-family: var(--mono);
+  font-size: var(--text-meta);
+  color: var(--accent);
+  margin-top: var(--s2);
+  word-break: break-all;
 }
 
-.explain-summary {
-  font-size: var(--text-body);
-  line-height: 1.6;
-  color: var(--text);
-  margin-bottom: var(--s5);
-}
-
-.explain-loading,
-.explain-error,
-.explain-empty {
-  font-size: var(--text-ui);
+.inspector-loading,
+.inspector-error,
+.inspector-empty {
+  font-size: var(--text-meta);
   color: var(--muted);
+  margin-top: var(--s2);
 }
 
-.explain-error {
+.inspector-error {
   color: var(--critical);
 }
 
-.explain-stats {
+.inspector-stats {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+  grid-template-columns: repeat(2, 1fr);
   gap: var(--s2);
-  margin-bottom: var(--s5);
+  margin-top: var(--s3);
 }
 
-.explain-stat {
+.inspector-stat {
   background: var(--raised);
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
-  padding: var(--s2) var(--s3);
+  padding: var(--s2);
 }
 
-.explain-stat dt {
+.inspector-stat dt {
   font-size: var(--text-meta);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--muted);
 }
 
-.explain-stat dd {
-  font-size: var(--text-title);
+.inspector-stat dd {
+  font-size: var(--text-label);
   color: var(--text);
   line-height: 1.2;
 }
 
-.explain-stat span {
+.inspector-verdict {
   font-size: var(--text-meta);
-  color: var(--muted);
+  line-height: 1.5;
+  color: var(--text);
+  border-left: 2px solid var(--accent);
+  padding-left: var(--s2);
+  margin-top: var(--s3);
 }
 
-.explain-section {
-  margin-bottom: var(--s5);
+.inspector-actions {
+  display: flex;
+  gap: var(--s2);
+  margin-top: var(--s3);
 }
 
-.explain-section h2 {
+.inspector-action {
+  flex: 1;
+  padding: var(--s2);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--raised);
+  color: var(--text);
+  font-size: var(--text-ui);
+  font-weight: var(--weight-strong);
+  cursor: pointer;
+}
+
+.inspector-action:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.inspector-detail {
+  margin-top: var(--s4);
+  border-top: 1px solid var(--line);
+  padding-top: var(--s3);
+}
+
+.inspector-summary {
+  font-size: var(--text-meta);
+  line-height: 1.6;
+  color: var(--text);
+  margin-bottom: var(--s3);
+}
+
+.inspector-section {
+  margin-bottom: var(--s3);
+}
+
+.inspector-section h3 {
   font-size: var(--text-meta);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--muted);
-  margin-bottom: var(--s2);
   font-weight: var(--weight-strong);
+  margin-bottom: var(--s2);
 }
 
-.explain-counts {
-  text-transform: none;
-  letter-spacing: 0;
-  font-weight: var(--weight-normal);
-  color: var(--muted);
-}
-
-.explain-list {
+.inspector-list {
   list-style: none;
 }
 
-.explain-list li {
+.inspector-list li {
   margin-bottom: var(--s1);
 }
 
-.explain-list button {
+.inspector-list button,
+.inspector-static {
   width: 100%;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: var(--s3);
-  padding: var(--s2) var(--s3);
+  gap: var(--s2);
+  padding: var(--s1) var(--s2);
   background: var(--raised);
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
   color: var(--text);
-  font-size: var(--text-ui);
-  cursor: pointer;
+  font-size: var(--text-meta);
   text-align: left;
 }
 
-.explain-list button:hover {
+.inspector-list button {
+  cursor: pointer;
+}
+
+.inspector-list button:hover {
   border-color: var(--accent);
   background: rgba(125, 211, 252, 0.08);
 }
 
-.explain-name {
+.inspector-name {
   word-break: break-all;
+}
+
+.inspector-meta {
+  color: var(--muted);
+  white-space: nowrap;
 }
 
 /* The one warning-coloured chip in the product. Used once, it still means
    something: history says these files travel together and the code does not
    admit it. */
-.explain-flag {
+.inspector-flag {
   display: inline-block;
   margin-right: var(--s1);
   padding: 0 var(--s1);
@@ -606,90 +533,36 @@ button {
   color: var(--warn);
   font-size: var(--text-meta);
   text-transform: uppercase;
-  letter-spacing: 0.06em;
 }
 
-/* Reads like the clickable rows but isn't — contributors are not nodes you
-   can open, and a button that goes nowhere is worse than no button. */
-.explain-static {
-  width: 100%;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--s3);
-  padding: var(--s2) var(--s3);
-  background: var(--raised);
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  font-size: var(--text-ui);
-}
-
-/* Fixed-width so a column of routes scans as a table, not as prose. */
-.explain-method {
+.inspector-method {
   display: inline-block;
-  min-width: 3.6rem;
-  margin-right: var(--s2);
+  min-width: 3.2rem;
+  margin-right: var(--s1);
   font-family: var(--mono);
-  font-size: var(--text-meta);
-  letter-spacing: 0.04em;
   color: var(--accent);
 }
 
-.explain-note-inline {
-  margin-top: var(--s2);
+.inspector-note {
   font-size: var(--text-meta);
   line-height: 1.5;
   color: var(--muted);
+  margin-top: var(--s2);
 }
 
-.explain-meta {
-  font-size: var(--text-meta);
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-.explain-paths {
+.inspector-paths {
   list-style: none;
   font-family: var(--mono);
   font-size: var(--text-meta);
   color: var(--muted);
 }
 
-.explain-paths li {
-  padding: var(--s2) var(--s3);
+.inspector-paths li {
+  padding: var(--s2);
   background: var(--raised);
   border-radius: var(--r-sm);
   margin-bottom: var(--s1);
   word-break: break-all;
-  line-height: 1.5;
-}
-
-.explain-foot {
-  margin-top: var(--s5);
-  border-top: 1px solid var(--line);
-  padding-top: var(--s4);
-}
-
-.explain-ripple {
-  width: 100%;
-  padding: var(--s2);
-  border-radius: var(--r-md);
-  border: 1px solid rgba(251, 146, 60, 0.35);
-  background: rgba(251, 146, 60, 0.08);
-  color: var(--impact);
-  font-size: var(--text-ui);
-  font-weight: var(--weight-strong);
-  cursor: pointer;
-}
-
-.explain-ripple:hover {
-  background: rgba(251, 146, 60, 0.16);
-}
-
-.explain-note {
-  margin-top: var(--s3);
-  font-size: var(--text-meta);
-  color: var(--muted);
   line-height: 1.5;
 }
 
@@ -699,31 +572,22 @@ button {
    half, the reading takes the lower, and nothing is ever pushed off-screen. */
 
 @media (max-width: 860px) {
-  .explain-scrim {
-    align-items: flex-end;
-  }
-
-  .explain-page {
-    width: 100%;
-    height: 82vh;
-    border-left: none;
-    border-top: 1px solid var(--line);
-    border-radius: var(--r-md) var(--r-md) 0 0;
-    padding: var(--s4) var(--s4) var(--s6);
-  }
-
-  .node-card {
+  /* The inspector becomes a bottom sheet: the graph keeps the upper half. */
+  .inspector {
     right: 0;
     left: 0;
     top: auto;
     bottom: 0;
     width: 100%;
     max-height: 55vh;
-    overflow-y: auto;
     border-radius: var(--r-md) var(--r-md) 0 0;
     border-left: none;
     border-right: none;
     border-bottom: none;
+  }
+
+  .hud-bottom {
+    display: none; /* the inspector already says where you are */
   }
 
   .hud-top {
@@ -746,12 +610,8 @@ button {
 }
 
 @media (max-width: 480px) {
-  .explain-stats {
+  .inspector-stats {
     grid-template-columns: repeat(2, 1fr);
-  }
-
-  .explain-page {
-    height: 88vh;
   }
 }
 
@@ -761,7 +621,7 @@ button {
     padding: var(--s2) var(--s3);
   }
 
-  .explain-list button {
-    padding: var(--s3);
+  .inspector-list button {
+    padding: var(--s2);
   }
 }

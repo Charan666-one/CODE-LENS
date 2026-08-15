@@ -54,13 +54,20 @@ interface GraphState {
   advanceRipple: () => void;
   clearRipple: () => void;
 
-  /** The explanation page: why the project needs this file or folder.
-   *  Deterministic facts — no API key required. */
+  /** Why the project needs the selected file or folder. Deterministic facts,
+   *  no API key required.
+   *
+   *  Fetched by `select` rather than by a button: the inspector shows real
+   *  numbers the instant something is selected, and there is no state where a
+   *  panel is open but empty waiting for a click. */
   explanation: Explanation | null;
   explaining: string | null;
   explainError: string | null;
-  openExplanation: (nodeId: string) => Promise<void>;
-  closeExplanation: () => void;
+  /** Whether the inspector is showing the full detail or just the summary.
+   *  The deep content is one click away, never permanently on screen. */
+  detailOpen: boolean;
+  toggleDetail: () => void;
+  closeInspector: () => void;
 }
 
 export const useGraphStore = create<GraphState>((set, get) => ({
@@ -137,8 +144,33 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   skipReveal: () =>
     set((s) => ({ phase: "exploring", revealIndex: s.maxAssemblyIndex })),
 
-  // Selecting a different node ends any ripple in progress.
-  select: (id) => set({ selectedId: id, blast: null, rippleFor: null }),
+  // Selecting a different node ends any ripple in progress, and immediately
+  // asks the graph what this node is. A cluster is a view-layer invention
+  // with no node of its own, so the question goes to its `explain_id`.
+  select: (id) => {
+    set({
+      selectedId: id,
+      blast: null,
+      rippleFor: null,
+      explanation: null,
+      explainError: null,
+      detailOpen: false,
+      explaining: id,
+    });
+    if (id === null) return;
+    const { snapshotId, spec } = get();
+    if (snapshotId === null) return;
+    const node = spec?.nodes.find((candidate) => candidate.id === id);
+    const target = node?.explain_id ?? id;
+    void fetchExplanation(snapshotId, target)
+      .then((explanation) => {
+        // Ignore a stale response if the user moved on to another node.
+        if (get().selectedId === id) set({ explanation });
+      })
+      .catch((error: Error) => {
+        if (get().selectedId === id) set({ explainError: error.message });
+      });
+  },
 
   showRipple: async (nodeId: string) => {
     const { snapshotId } = get();
@@ -168,22 +200,18 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   explanation: null,
   explaining: null,
   explainError: null,
+  detailOpen: false,
 
-  openExplanation: async (nodeId: string) => {
-    const { snapshotId } = get();
-    if (snapshotId === null) return;
-    set({ explaining: nodeId, explanation: null, explainError: null });
-    try {
-      const explanation = await fetchExplanation(snapshotId, nodeId);
-      // Ignore a stale response if the user moved on to another node.
-      if (get().explaining === nodeId) set({ explanation });
-    } catch (error) {
-      if (get().explaining === nodeId) {
-        set({ explainError: (error as Error).message });
-      }
-    }
-  },
+  toggleDetail: () => set((s) => ({ detailOpen: !s.detailOpen })),
 
-  closeExplanation: () =>
-    set({ explanation: null, explaining: null, explainError: null }),
+  closeInspector: () =>
+    set({
+      selectedId: null,
+      explanation: null,
+      explaining: null,
+      explainError: null,
+      detailOpen: false,
+      blast: null,
+      rippleFor: null,
+    }),
 }));
