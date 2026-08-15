@@ -33,6 +33,8 @@ export default function NodeInspector() {
   const blast = useGraphStore((s) => s.blast);
   const rippleFor = useGraphStore((s) => s.rippleFor);
   const clearRipple = useGraphStore((s) => s.clearRipple);
+  const dive = useGraphStore((s) => s.dive);
+  const zoom = useGraphStore((s) => s.zoom);
 
   if (phase !== "exploring" && phase !== "revealing") return null;
   if (!selectedId) return null;
@@ -86,6 +88,17 @@ export default function NodeInspector() {
             </div>
           ) : (
             <div className="inspector-actions">
+              {/* Double-click on the canvas does this too, but a gesture
+                  nobody can see is a gesture nobody uses. */}
+              {zoom < 3 && (
+                <button
+                  className="inspector-action"
+                  onClick={() => void dive(selectedId)}
+                  title="Go a level deeper, here"
+                >
+                  Dive in
+                </button>
+              )}
               <button className="inspector-action" onClick={() => void showRipple(graphId)}>
                 Impact
               </button>

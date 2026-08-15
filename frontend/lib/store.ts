@@ -86,6 +86,16 @@ interface GraphState {
   paletteOpen: boolean;
   setPalette: (open: boolean) => void;
 
+  /** The dive. Going a level deeper *at a place* rather than switching a tab:
+   *  the camera holds the district you opened while the new level assembles
+   *  around it, so L1 → L2 → L3 reads as travel instead of navigation.
+   *
+   *  `pendingFocus` is the cluster the next spec should be framed on. The
+   *  renderer consumes it once the new level has arrived and clears it. */
+  pendingFocus: string | null;
+  dive: (nodeId: string) => Promise<void>;
+  consumeFocus: () => void;
+
   /** A query's answer, drawn ON the graph.
    *
    *  This is the rule that keeps the product one canvas: a query never opens
@@ -258,6 +268,22 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
   paletteOpen: false,
   setPalette: (open) => set({ paletteOpen: open }),
+
+  pendingFocus: null,
+  consumeFocus: () => set({ pendingFocus: null }),
+
+  dive: async (nodeId: string) => {
+    const { zoom, spec } = get();
+    if (zoom >= 3) return; // L3 is the floor; there is nothing under a symbol
+    const node = spec?.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node) return;
+    // A district's own key is its cluster; a file's is the district holding
+    // it. Either way the next level is framed on the same region of the repo,
+    // which is what makes the movement read as going *inward* rather than
+    // sideways to another view.
+    set({ pendingFocus: node.kind === "cluster" ? node.label : node.cluster });
+    await get().setZoom(zoom + 1);
+  },
 
   overlay: null,
   overlayError: null,

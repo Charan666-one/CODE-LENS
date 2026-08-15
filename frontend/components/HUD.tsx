@@ -90,7 +90,7 @@ export default function HUD() {
                 {spec.nodes.length} nodes · {spec.edges.length} relationships
               </>
             )}
-            <span className="hud-hint"> · Scroll to zoom · Click to inspect</span>
+            <span className="hud-hint"> · Click to inspect · Double-click to dive in</span>
           </span>
         )}
       </footer>

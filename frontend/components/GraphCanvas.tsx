@@ -25,7 +25,10 @@ import { useGraphStore } from "@/lib/store";
  *  Centre on the centroid; size to a high percentile of each axis's spread so
  *  a couple of stray nodes don't shrink everything. Uses the same y-flip the
  *  graph is built with, so the box matches what's on screen. */
-function massBBox(nodes: { x: number; y: number }[]): { x: [number, number]; y: [number, number] } {
+function massBBox(
+  nodes: { x: number; y: number }[],
+  pad = 1,
+): { x: [number, number]; y: [number, number] } {
   const xs = nodes.map((n) => n.x);
   const ys = nodes.map((n) => -n.y); // graph stores y flipped; match it
   const cx = xs.reduce((a, b) => a + b, 0) / xs.length;
@@ -40,7 +43,7 @@ function massBBox(nodes: { x: number; y: number }[]): { x: [number, number]; y: 
   // 88th percentile keeps ~1-2 outliers out of the frame; ×1.25 adds margin.
   const halfW = percentile(xs, cx, 0.88) * 1.25;
   const halfH = percentile(ys, cy, 0.88) * 1.25;
-  const half = Math.max(halfW, halfH); // square box → no axis distortion
+  const half = Math.max(halfW, halfH) * pad; // square box → no axis distortion
   return { x: [cx - half, cx + half], y: [cy - half, cy + half] };
 }
 
@@ -165,6 +168,14 @@ export default function GraphCanvas() {
         }
         state.select(state.selectedId === node ? null : node);
       });
+      // Double-click dives. Sigma's own double-click zooms the camera, which
+      // would fight the level change, so its default is suppressed.
+      sigma.on("doubleClickNode", ({ node, event }) => {
+        event.preventSigmaDefault();
+        const state = useGraphStore.getState();
+        if (state.phase === "revealing") return;
+        void state.dive(node);
+      });
       sigma.on("clickStage", () => {
         const state = useGraphStore.getState();
         if (state.phase === "revealing") state.skipReveal();
@@ -281,11 +292,67 @@ export default function GraphCanvas() {
     };
     frameRef.current = requestAnimationFrame(step);
 
-    sigma.getCamera().animate(
-      { x: 0.5, y: 0.5, ratio: 1, angle: 0 },
-      { duration: survivors.length > 0 ? TRANSITION_MS : 0 },
-    );
+    // Where the camera lands after a level change. A plain reset would snap
+    // back to the whole repository every time, which is what made L1/L2/L3
+    // feel like three separate views: you dive into `src` and arrive looking
+    // at everything. If a dive named a region, frame that instead — the
+    // district you opened stays under the camera while its contents assemble
+    // around it.
+    const focus = useGraphStore.getState().pendingFocus;
+    const framed = focus
+      ? spec.nodes.filter((node) => node.cluster === focus || node.label === focus)
+      : [];
+    if (framed.length > 0) {
+      // Padded, because arriving with the district edge-to-edge reads as
+      // being dumped somewhere rather than as having gone *into* it. At 2x
+      // the region fills the middle of the screen and its surroundings stay
+      // visible at the margins, which is what makes the move feel like
+      // travel with a destination.
+      sigma.setCustomBBox(massBBox(framed, 2));
+      useGraphStore.getState().consumeFocus();
+    }
+    // Refresh BEFORE moving the camera. Camera coordinates are relative to the
+    // current bounding box, so animating first interprets `{0.5, 0.5}` against
+    // the *previous* level's extent and lands nowhere near the new nodes — a
+    // level switch rendered a blank canvas until this ordering was fixed.
+    sigma.refresh();
+    // `animatedReset`, never a hand-written {0.5, 0.5, ratio 1}. Those look
+    // like the home position and are not: the camera's default is derived
+    // from the current bounding box, so writing the coordinates by hand
+    // framed the *previous* level's extent and left L1 rendering a blank
+    // canvas while L2 looked fine. Sigma knows where home is; ask it.
+    sigma.getCamera().animatedReset({
+      duration: survivors.length > 0 ? TRANSITION_MS : 0,
+    });
   }, [spec, ready]);
+
+  // ── the camera follows the selection ────────────────────────────────────
+  //
+  // Clicking should feel like *entering* a part of the codebase, not like
+  // ticking a checkbox on a circle. The camera moves to the node and closes
+  // in; releasing the selection pulls back out to the whole level.
+  useEffect(() => {
+    const sigma = sigmaRef.current;
+    if (!sigma || phase !== "exploring") return;
+    const camera = sigma.getCamera();
+
+    // Deliberately no auto-pull-back on deselect. Two things argued for it:
+    // yanking the camera home every time a selection is released is jarring
+    // when the reader is mid-exploration, and every attempt to script the
+    // "home" position fought the custom bounding box a level change had just
+    // installed — L1 rendered blank while L2 looked fine. Releasing a
+    // selection now leaves the view exactly where it is; the level buttons
+    // and a dive are what move the camera.
+    if (!selectedId || !sigma.getGraph().hasNode(selectedId)) return;
+    const position = sigma.getNodeDisplayData(selectedId);
+    if (!position) return;
+    camera.animate(
+      // Never zoom *out* to reach something: if the reader has already pushed
+      // in closer than this, honour that and only re-centre.
+      { x: position.x, y: position.y, ratio: Math.min(camera.ratio, 0.55) },
+      { duration: 420 },
+    );
+  }, [selectedId, phase]);
 
   // The reveal, the ripple, and the relevance hierarchy are all reducers over
   // precomputed state — the renderer decides nothing, it only choreographs.
