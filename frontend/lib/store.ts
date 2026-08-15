@@ -1,8 +1,20 @@
 "use client";
 
 import { create } from "zustand";
-import { analyzeRepo, fetchBlastRadius, fetchExplanation, fetchViewSpec } from "./api";
-import type { BlastResult, Explanation, PipelineStage, ViewSpec } from "./types";
+import {
+  analyzeRepo,
+  fetchBlastRadius,
+  fetchExplanation,
+  fetchViewSpec,
+  runQuery,
+} from "./api";
+import type {
+  BlastResult,
+  Explanation,
+  PipelineStage,
+  QueryResult,
+  ViewSpec,
+} from "./types";
 
 /** The Graph State Manager (ARCHITECTURE.md: the game-engine model).
  *
@@ -68,6 +80,35 @@ interface GraphState {
   detailOpen: boolean;
   toggleDetail: () => void;
   closeInspector: () => void;
+
+  /** ⌘K. The whole point of a minimal interface is that power lives here
+   *  rather than in permanent chrome. */
+  paletteOpen: boolean;
+  setPalette: (open: boolean) => void;
+
+  /** A query's answer, drawn ON the graph.
+   *
+   *  This is the rule that keeps the product one canvas: a query never opens
+   *  a table. `cycles` isolates its loops, `risk` lights the risky files,
+   *  `untested_hubs` shows the gap. The overlay is just a set of node ids the
+   *  renderer treats as "the answer"; everything else recedes. */
+  overlay: Overlay | null;
+  runOverlay: (name: string, label: string, params?: Record<string, unknown>) => Promise<void>;
+  clearOverlay: () => void;
+  overlayError: string | null;
+}
+
+export interface Overlay {
+  query: string;
+  label: string;
+  /** Every node the answer touches. */
+  nodeIds: string[];
+  /** For findings made of several distinct groups — each cycle is one group —
+   *  so the renderer can tell them apart instead of showing one blob. */
+  groups: string[][];
+  /** One line of plain English, from the query's own `explanation`. */
+  detail: string;
+  count: number;
 }
 
 export const useGraphStore = create<GraphState>((set, get) => ({
@@ -214,4 +255,51 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       blast: null,
       rippleFor: null,
     }),
+
+  paletteOpen: false,
+  setPalette: (open) => set({ paletteOpen: open }),
+
+  overlay: null,
+  overlayError: null,
+
+  runOverlay: async (name, label, params = {}) => {
+    const { snapshotId } = get();
+    if (snapshotId === null) return;
+    set({ paletteOpen: false, overlayError: null, selectedId: null, blast: null, rippleFor: null });
+    try {
+      const result = await runQuery(snapshotId, name, params);
+      const groups = groupsFor(name, result);
+      const nodeIds = groups.length > 0 ? [...new Set(groups.flat())] : result.node_ids;
+      set({
+        overlay: {
+          query: name,
+          label,
+          nodeIds,
+          groups,
+          detail: typeof result.meta.explanation === "string" ? result.meta.explanation : "",
+          count:
+            typeof result.meta.total === "number" ? result.meta.total : nodeIds.length,
+        },
+      });
+      // Findings are about files, and L1 draws districts. Dropping to the
+      // level where the answer is actually visible is the difference between
+      // an overlay and a shrug.
+      if (nodeIds.length > 0 && get().zoom === 1) await get().setZoom(2);
+    } catch (error) {
+      set({ overlayError: (error as Error).message });
+    }
+  },
+
+  clearOverlay: () => set({ overlay: null, overlayError: null }),
 }));
+
+/** Some answers are made of distinct groups rather than one set. A cycle is
+ *  only meaningful as a loop, so the renderer needs them kept apart. */
+function groupsFor(name: string, result: QueryResult): string[][] {
+  if (name !== "cycles") return [];
+  const cycles = result.meta.cycles;
+  if (!Array.isArray(cycles)) return [];
+  return cycles.map((cycle) =>
+    ((cycle as { files?: { id: string }[] }).files ?? []).map((file) => file.id),
+  );
+}

@@ -32,7 +32,7 @@ from app.graph.schema import KnowledgeGraph, NodeKind
 from app.graph.store import GraphStore
 from app.ingestion import IngestedRepo, ingest
 from app.ingestion.git_history import apply_history, histories_from_commits, read_log
-from app.parser import PARSED_EXTENSIONS, parse_ingested
+from app.parser import PARSED_EXTENSIONS, PARSER_VERSION, parse_ingested
 
 
 class Stage(str, Enum):
@@ -90,7 +90,13 @@ def run_pipeline(
     if existing_id is not None:
         graph = store.load_graph(snapshot.repo_url, snapshot.commit_sha)
         assert graph is not None  # find_snapshot just said it exists
-        if _stored_digest(graph) == _inventory_digest(ingested):
+        # Same bytes AND the same parser. A graph built by an older parser
+        # is a faithful record of what an older CodeLens saw, which is not
+        # what the caller asked for.
+        if (
+            _stored_digest(graph) == _inventory_digest(ingested)
+            and graph.snapshot.parser_version == PARSER_VERSION
+        ):
             report(Stage.PARSED, 0.0, True)
             report(Stage.METRICS, 0.0, True)
             report(Stage.GRAPH_BUILT, 0.0, True)

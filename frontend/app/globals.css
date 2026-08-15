@@ -258,6 +258,18 @@ button {
   flex: 1;
 }
 
+.palette-open {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+.palette-open:hover .kbd {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
 .zoom {
   display: flex;
   gap: var(--s1);
@@ -564,6 +576,152 @@ button {
   margin-bottom: var(--s1);
   word-break: break-all;
   line-height: 1.5;
+}
+
+
+/* ── the command palette ─────────────────────────────────────────────── */
+/* Everything the product can do, one keystroke away, nothing on screen
+   until asked. This is the trade that lets the chrome stay this thin. */
+
+.palette-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  background: rgba(3, 6, 12, 0.6);
+  backdrop-filter: blur(2px);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh;
+}
+
+.palette {
+  width: min(560px, 92vw);
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.palette-input {
+  width: 100%;
+  padding: var(--s3) var(--s4);
+  border: none;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--text-body);
+  outline: none;
+}
+
+.palette-input::placeholder {
+  color: var(--muted);
+}
+
+.palette-list {
+  list-style: none;
+  max-height: 48vh;
+  overflow-y: auto;
+  padding: var(--s1);
+}
+
+.palette-row {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--s3);
+  padding: var(--s2) var(--s3);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-ui);
+  text-align: left;
+  cursor: pointer;
+}
+
+.palette-row.active {
+  background: rgba(125, 211, 252, 0.12);
+  color: var(--accent);
+}
+
+.palette-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.palette-hint {
+  color: var(--muted);
+  font-size: var(--text-meta);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+}
+
+.palette-empty {
+  padding: var(--s3);
+  color: var(--muted);
+  font-size: var(--text-meta);
+}
+
+/* ── the overlay readout ─────────────────────────────────────────────── */
+/* A query's answer is ON the graph; this line only says what you are
+   looking at and how to leave. */
+
+.overlay-bar {
+  position: absolute;
+  top: var(--s6);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s2) var(--s3);
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-full);
+  font-size: var(--text-meta);
+  box-shadow: var(--shadow);
+}
+
+.overlay-label {
+  color: var(--accent);
+  font-weight: var(--weight-strong);
+}
+
+.overlay-detail {
+  color: var(--muted);
+  max-width: 46ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overlay-clear {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: var(--text-meta);
+}
+
+.overlay-clear:hover {
+  color: var(--text);
+}
+
+.kbd {
+  font-family: var(--mono);
+  font-size: var(--text-meta);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 0 var(--s1);
 }
 
 /* ── responsive ──────────────────────────────────────────────────────── */

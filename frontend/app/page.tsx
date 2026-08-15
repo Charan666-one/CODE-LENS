@@ -2,6 +2,7 @@
 
 import dynamic from "next/dynamic";
 import HeroInput from "@/components/HeroInput";
+import CommandPalette from "@/components/CommandPalette";
 import HUD from "@/components/HUD";
 import NodeInspector from "@/components/NodeInspector";
 import UnderstandingOverlay from "@/components/UnderstandingOverlay";
@@ -19,6 +20,7 @@ export default function Home() {
       <UnderstandingOverlay />
       <HUD />
       <NodeInspector />
+      <CommandPalette />
     </main>
   );
 }

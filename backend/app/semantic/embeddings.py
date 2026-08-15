@@ -94,16 +94,38 @@ class ConceptIndex:
 def concept_search(
     view: GraphView, *, index: ConceptIndex, text: str, top: int = 10
 ) -> ResultGraph:
-    """Q7 as a query plan: concept in, ranked graph nodes out."""
+    """Q7 as a query plan: concept in, ranked graph nodes out.
+
+    Each hit carries the node's name, kind and path alongside the score. A
+    result that is only an id and a similarity forces every caller to either
+    re-look-up the node or display the raw qualified name — the command
+    palette did the latter and showed
+    `tests.test_session_interface.test_open_session_with_endpoint.MySessionInterface.save_session`
+    where it wanted `save_session` and its file. The plan knows all of it; not
+    returning it was the omission.
+    """
     hits = index.search(text, top=top)
+    ranked: list[RankedNode] = []
+    for node_id, score in hits:
+        node = view.node(node_id)
+        ranked.append(
+            RankedNode(
+                node_id=node_id,
+                score=score,
+                reasons={
+                    "similarity": round(score, 4),
+                    "name": node.name if node else node_id,
+                    "kind": node.kind.value if node else None,
+                    "file_path": node.file_path if node else None,
+                    "start_line": node.start_line if node else None,
+                },
+            )
+        )
     return ResultGraph(
         query="concept_search",
         params={"text": text, "top": top},
         node_ids=[node_id for node_id, _ in hits],
-        ranked=[
-            RankedNode(node_id=node_id, score=score, reasons={"similarity": round(score, 4)})
-            for node_id, score in hits
-        ],
+        ranked=ranked,
         meta={"indexed_nodes": len(index._vectors)},
     )
 

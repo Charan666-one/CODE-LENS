@@ -36,7 +36,28 @@ from app.parser.js_emitter import JsEmitter
 from app.parser.python_emitter import PythonEmitter, module_qname_for
 from app.parser.resolution import apply_entrypoints, resolve
 
-__all__ = ["PARSED_EXTENSIONS", "module_qname_for", "parse_ingested", "parse_repository"]
+__all__ = [
+    "PARSED_EXTENSIONS",
+    "PARSER_VERSION",
+    "module_qname_for",
+    "parse_ingested",
+    "parse_repository",
+]
+
+#: Bump whenever emission or resolution semantics change — a new edge kind, a
+#: different import resolution rule, a fixed false positive.
+#:
+#: The content-hash skip asks "are these the same bytes?", which is the right
+#: question for re-analysing an unchanged repo and the wrong one after the
+#: parser itself improves: the stored graph is still a faithful record of what
+#: an *older* CodeLens saw. Without this, every fix shipped here would leave
+#: existing users looking at pre-fix graphs with no way to tell. Observed
+#: exactly that way — cycle counts in the UI stayed at the old value while the
+#: same query on a fresh parse gave the corrected one.
+#:
+#:   2  type-only imports marked; `from . import X` no longer depends on the
+#:      package root; endpoints, TESTS, CO_CHANGES, AUTHORED_BY emitted
+PARSER_VERSION = "2"
 
 _PYTHON_EXTENSIONS = frozenset({"py", "pyi"})
 _JS_EXTENSIONS = frozenset({"js", "jsx", "mjs", "cjs"})
@@ -150,7 +171,8 @@ def _assemble(ingested: IngestedRepo, facts: list[FileFacts]) -> KnowledgeGraph:
     endpoint_nodes, endpoint_edges = _endpoints(facts)
     nodes.extend(endpoint_nodes)
     edges.extend(endpoint_edges)
-    return KnowledgeGraph(snapshot=ingested.snapshot, nodes=nodes, edges=edges)
+    snapshot = ingested.snapshot.model_copy(update={"parser_version": PARSER_VERSION})
+    return KnowledgeGraph(snapshot=snapshot, nodes=nodes, edges=edges)
 
 
 def _endpoints(facts: list[FileFacts]) -> tuple[list[Node], list[Edge]]:

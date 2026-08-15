@@ -156,6 +156,10 @@ class RepoSnapshot(BaseModel):
     total_loc: int | None = None
     analyzed_at: str                   # ISO timestamp
     schema_version: str = SCHEMA_VERSION
+    #: Which parser produced this graph. Defaults to "0" — meaning "built
+    #: before this was tracked" — so every pre-existing snapshot is treated as
+    #: stale rather than silently trusted. See PARSER_VERSION.
+    parser_version: str = "0"
 
 
 class KnowledgeGraph(BaseModel):

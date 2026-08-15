@@ -124,6 +124,8 @@ export default function GraphCanvas() {
   const rippleFront = useGraphStore((s) => s.rippleFront);
   const advanceRipple = useGraphStore((s) => s.advanceRipple);
   const clearRipple = useGraphStore((s) => s.clearRipple);
+  const overlay = useGraphStore((s) => s.overlay);
+  const clearOverlay = useGraphStore((s) => s.clearOverlay);
 
   // ── the instance: created once, never rebuilt ───────────────────────────
   //
@@ -167,6 +169,7 @@ export default function GraphCanvas() {
         const state = useGraphStore.getState();
         if (state.phase === "revealing") state.skipReveal();
         else if (state.rippleFor) state.clearRipple();
+        else if (state.overlay) state.clearOverlay();
         else state.select(null);
       });
 
@@ -303,6 +306,18 @@ export default function GraphCanvas() {
     }
     const rippleActive = rippleFor !== null && graph.hasNode(rippleFor);
 
+    // A query's answer, drawn on the graph. Node ids come from the graph, but
+    // a cluster at L1 is a view-layer invention, so `explainId` is checked too
+    // — otherwise an answer about files would light nothing at district level.
+    const answered = new Set<string>();
+    if (overlay && !rippleActive) {
+      const wanted = new Set(overlay.nodeIds);
+      graph.forEachNode((id, data) => {
+        if (wanted.has(id) || wanted.has(data.explainId as string)) answered.add(id);
+      });
+    }
+    const overlayActive = answered.size > 0;
+
     // The relevance hierarchy: direct neighbours, then everything one hop
     // further out. Second degree is what turns a selection from a star into a
     // readable neighbourhood — it shows the shape of what the change touches.
@@ -406,6 +421,15 @@ export default function GraphCanvas() {
         return { ...data, size: baseSize * 1.4, color: "rgba(251,146,60,0.5)" };
       }
 
+      if (overlayActive) {
+        // Only the wiring between answered nodes — for `cycles` this is what
+        // turns a set of files into a visible loop.
+        if (!answered.has(source) || !answered.has(target)) {
+          return { ...data, hidden: true };
+        }
+        return { ...data, color: "rgba(125,211,252,0.9)", size: baseSize * 2.2 };
+      }
+
       if (selectedId) {
         const touchesSelection = source === selectedId || target === selectedId;
         const withinDirect =
@@ -431,7 +455,7 @@ export default function GraphCanvas() {
     });
 
     sigma.refresh();
-  }, [phase, revealIndex, selectedId, rippleFor, blast, rippleFront, spec]);
+  }, [phase, revealIndex, selectedId, rippleFor, blast, rippleFront, spec, overlay]);
 
   // Drive the ripple clock: the wave expands one distance ring at a time.
   useEffect(() => {
@@ -454,12 +478,13 @@ export default function GraphCanvas() {
         const state = useGraphStore.getState();
         if (state.phase === "revealing") skipReveal();
         else if (state.rippleFor) clearRipple();
+        else if (state.overlay) clearOverlay();
         else select(null);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [skipReveal, select, clearRipple]);
+  }, [skipReveal, select, clearRipple, clearOverlay]);
 
   return <div ref={containerRef} className="graph-canvas" />;
 }
