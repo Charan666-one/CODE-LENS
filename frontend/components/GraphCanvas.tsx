@@ -1,16 +1,26 @@
 "use client";
 
 import Graph from "graphology";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import Sigma from "sigma";
 import { useGraphStore } from "@/lib/store";
 
 /** The renderer — and only the renderer (ARCHITECTURE.md §6).
  *
- *  Positions, sizes, colors, and assembly order all arrive precomputed in
- *  the ViewSpec. This component's whole job: put them on a WebGL canvas,
- *  animate the reveal, dim the world in focus mode. It computes nothing.
+ *  Positions, sizes, colors, and assembly order all arrive precomputed in the
+ *  ViewSpec. This component's whole job: put them on a WebGL canvas, animate
+ *  the transitions, and resolve the relevance hierarchy. It computes nothing.
+ *
+ *  **One Sigma instance, for the life of the session.** It used to be built
+ *  and killed on every spec change, which is what made L1/L2/L3 feel like
+ *  three separate pages: with no object surviving the switch there was
+ *  nothing to animate, and the canvas visibly tore down and reassembled.
+ *  Now the graph is *diffed* — nodes present at both levels keep their
+ *  identity and glide to their new position, arrivals fade in, departures
+ *  fade out. Same data, same ViewSpec contract; the continuity is what makes
+ *  it read as one world seen at three depths.
  */
+
 /** A camera bounding box that frames the bulk of the graph, not its outliers.
  *  Centre on the centroid; size to a high percentile of each axis's spread so
  *  a couple of stray nodes don't shrink everything. Uses the same y-flip the
@@ -45,9 +55,62 @@ function rippleColor(distance: number, front: number): string {
   return `rgba(249, ${green}, 40, ${alpha.toFixed(2)})`;
 }
 
+/** How long a level change takes to resolve. Long enough to read as travel,
+ *  short enough that nobody waits for it. */
+const TRANSITION_MS = 620;
+
+/** Two dimensions, two channels — **alpha carries relevance, hue carries
+ *  confidence.**
+ *
+ *  The intent was dashed / dotted lines for the confidence ladder, which is
+ *  the clearer encoding. Sigma 3.0.3 ships no dash support and no built-in
+ *  edge program that accepts one, so a `dashed` attribute would have been
+ *  silently dropped: code that looks like it renders the ladder while
+ *  rendering nothing. Writing a custom WebGL edge program is the real fix and
+ *  is worth doing later.
+ *
+ *  Until then the ladder rides a single hue ramp — neutral for proven,
+ *  increasingly amber for unproven — so "amber-ness is doubt". It reuses the
+ *  palette's existing warning colour rather than inventing a meaning, stays
+ *  legible at 5% alpha, and leaves alpha entirely to the hierarchy. Width
+ *  reinforces it: a guess is drawn thinner than a proof. */
+/// The tints are perceptually matched to the slate, not to the palette's
+/// warning amber. First attempt used `#fbbf24` directly and the canvas turned
+/// gold: only 38% of Flask's edges are uncertain, but saturated amber at the
+/// same alpha reads several times louder than low-chroma slate, so a minority
+/// looked like an emergency. Same lightness, hue shifted — the uncertainty is
+/// legible without shouting.
+const CONFIDENCE_RGB: Record<string, string> = {
+  resolved: "148,163,184", // slate — a proven edge needs no colour
+  heuristic: "186,168,148", // warm grey — a name match, not a proof
+  dynamic_unknown: "205,162,124", // warmer — the target could be any of several
+};
+
+const CONFIDENCE_WIDTH: Record<string, number> = {
+  resolved: 1,
+  heuristic: 0.75,
+  dynamic_unknown: 0.55,
+};
+
+const edgeColor = (confidence: string, alpha: number): string =>
+  `rgba(${CONFIDENCE_RGB[confidence] ?? CONFIDENCE_RGB.resolved},${alpha})`;
+
+const easeInOutCubic = (t: number): number =>
+  t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+interface Placement {
+  x: number;
+  y: number;
+  size: number;
+}
+
 export default function GraphCanvas() {
   const containerRef = useRef<HTMLDivElement>(null);
   const sigmaRef = useRef<Sigma | null>(null);
+  const frameRef = useRef<number | null>(null);
+  /// Flips once Sigma exists, so the diff effect below re-runs for a spec
+  /// that arrived while the container was still being laid out.
+  const [ready, setReady] = useState(false);
 
   const spec = useGraphStore((s) => s.spec);
   const phase = useGraphStore((s) => s.phase);
@@ -62,80 +125,166 @@ export default function GraphCanvas() {
   const advanceRipple = useGraphStore((s) => s.advanceRipple);
   const clearRipple = useGraphStore((s) => s.clearRipple);
 
-  // Build/rebuild the sigma instance when a new spec arrives.
+  // ── the instance: created once, never rebuilt ───────────────────────────
+  //
+  // Creation waits for the container to have real dimensions. Sigma throws
+  // "Container has no width" if it does not, and now that the instance is
+  // built at mount rather than on first spec, mount can land before the
+  // stylesheet that gives `.graph-canvas` its size — the old code got away
+  // with it only because it constructed Sigma much later.
   useEffect(() => {
-    if (!containerRef.current || !spec) return;
+    const container = containerRef.current;
+    if (!container) return;
+    let cancelled = false;
 
-    const graph = new Graph({ multi: true, type: "directed" });
+    const create = () => {
+      if (cancelled || sigmaRef.current) return;
+      if (container.offsetWidth === 0 || container.offsetHeight === 0) return;
+
+      const graph = new Graph({ multi: true, type: "directed" });
+      const sigma = new Sigma(graph, container, {
+        renderLabels: true,
+        labelColor: { color: "#cbd5e1" },
+        labelSize: 11,
+        labelRenderedSizeThreshold: 7,
+        defaultEdgeType: "line",
+        minCameraRatio: 0.05,
+        maxCameraRatio: 4,
+      });
+
+      // Handlers read the store through getState(), so they never go stale and
+      // never need rebinding — which is what lets the instance outlive every
+      // spec, selection and level change.
+      sigma.on("clickNode", ({ node }) => {
+        const state = useGraphStore.getState();
+        if (state.phase === "revealing") {
+          state.skipReveal(); // one click and you're exploring — no forced sit-through
+          return;
+        }
+        state.select(state.selectedId === node ? null : node);
+      });
+      sigma.on("clickStage", () => {
+        const state = useGraphStore.getState();
+        if (state.phase === "revealing") state.skipReveal();
+        else if (state.rippleFor) state.clearRipple();
+        else state.select(null);
+      });
+
+      sigmaRef.current = sigma;
+      setReady(true);
+    };
+
+    create();
+    const observer = new ResizeObserver(create);
+    observer.observe(container);
+
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      sigmaRef.current?.kill();
+      sigmaRef.current = null;
+    };
+  }, []);
+
+  // ── the diff: same instance, new level ──────────────────────────────────
+  useEffect(() => {
+    const sigma = sigmaRef.current;
+    if (!sigma || !spec) return;
+    const graph = sigma.getGraph();
+
+    const incoming = new Map(spec.nodes.map((node) => [node.id, node]));
+    const survivors: string[] = [];
+    const departing: string[] = [];
+    // Collect before mutating: dropping a node inside forEachNode would
+    // invalidate the iteration.
+    graph.forEachNode((id) => {
+      (incoming.has(id) ? survivors : departing).push(id);
+    });
+
+    const from = new Map<string, Placement>();
+    for (const id of survivors) {
+      from.set(id, {
+        x: graph.getNodeAttribute(id, "x") as number,
+        y: graph.getNodeAttribute(id, "y") as number,
+        size: graph.getNodeAttribute(id, "size") as number,
+      });
+    }
+
+    for (const id of departing) graph.dropNode(id);
+    graph.clearEdges();
+
+    const to = new Map<string, Placement>();
     for (const node of spec.nodes) {
-      graph.addNode(node.id, {
+      const target: Placement = { x: node.x, y: -node.y, size: node.size };
+      to.set(node.id, target);
+      const attributes = {
         label: node.label,
-        x: node.x,
-        y: -node.y, // screen y grows downward; keep the server's geometry
         size: node.size,
         color: node.color,
         assemblyIndex: node.assembly_index,
         kind: node.kind,
         filePath: node.file_path,
         startLine: node.start_line,
-      });
+        cluster: node.cluster,
+        explainId: node.explain_id,
+      };
+      if (graph.hasNode(node.id)) {
+        // A survivor keeps the position it is currently drawn at; the tween
+        // below carries it to the new one.
+        const start = from.get(node.id) ?? target;
+        graph.mergeNodeAttributes(node.id, { ...attributes, x: start.x, y: start.y, size: start.size });
+      } else {
+        // An arrival starts small at its destination and grows in, so a new
+        // level assembles rather than pops.
+        graph.addNode(node.id, { ...attributes, x: target.x, y: target.y, size: 0.1 });
+      }
     }
+
     for (const edge of spec.edges) {
       if (!graph.hasNode(edge.source) || !graph.hasNode(edge.target)) continue;
       graph.addEdge(edge.source, edge.target, {
-        size: Math.min(3, 0.4 + Math.log1p(edge.weight) * 0.6),
-        // Uncertainty rendered, not hidden: guessed edges are fainter.
-        color:
-          edge.confidence === "resolved"
-            ? "rgba(148,163,184,0.35)"
-            : edge.confidence === "heuristic"
-              ? "rgba(148,163,184,0.18)"
-              : "rgba(148,163,184,0.10)",
+        baseSize: Math.min(3, 0.4 + Math.log1p(edge.weight) * 0.6),
+        confidence: edge.confidence,
+        kind: edge.kind,
       });
     }
 
-    const sigma = new Sigma(graph, containerRef.current, {
-      renderLabels: true,
-      labelColor: { color: "#cbd5e1" },
-      labelSize: 11,
-      labelRenderedSizeThreshold: 7,
-      defaultEdgeType: "line",
-      minCameraRatio: 0.05,
-      maxCameraRatio: 4,
-    });
-
-    sigma.on("clickNode", ({ node }) => {
-      const state = useGraphStore.getState();
-      if (state.phase === "revealing") {
-        state.skipReveal(); // one click and you're exploring — no forced sit-through
-        return;
-      }
-      state.select(state.selectedId === node ? null : node);
-    });
-    sigma.on("clickStage", () => {
-      const state = useGraphStore.getState();
-      if (state.phase === "revealing") state.skipReveal();
-      else if (state.rippleFor) state.clearRipple();
-      else state.select(null);
-    });
-
-    sigmaRef.current = sigma;
-    // Frame the MASS, not the bounding box. Sigma fits the camera to the full
-    // node extent, so a single far-flung file (a lone docs/example script)
-    // drags the dense districts off-centre and shrinks them. Instead we hand
-    // sigma a custom bbox built from the centroid and a robust radius that
-    // ignores outliers — the bulk fills the screen; a stray node just sits
-    // near the edge. Honest: no node is moved or hidden, only the camera frames.
     sigma.setCustomBBox(massBBox(spec.nodes));
-    sigma.refresh();
-    sigma.getCamera().animatedReset({ duration: 0 });
-    return () => {
-      sigma.kill();
-      sigmaRef.current = null;
-    };
-  }, [spec]);
 
-  // The reveal, the ripple, and focus dimming are all reducers over
+    // Tween survivors to their new places. The first spec of a session has no
+    // survivors, so this is a no-op there and the reveal animation owns the
+    // entrance.
+    if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+    const started = performance.now();
+    const step = () => {
+      const t = Math.min(1, (performance.now() - started) / TRANSITION_MS);
+      const eased = easeInOutCubic(t);
+      graph.forEachNode((id) => {
+        const start = from.get(id);
+        const end = to.get(id);
+        if (!end) return;
+        const origin = start ?? end;
+        graph.setNodeAttribute(id, "x", origin.x + (end.x - origin.x) * eased);
+        graph.setNodeAttribute(id, "y", origin.y + (end.y - origin.y) * eased);
+        graph.setNodeAttribute(
+          id,
+          "size",
+          (start?.size ?? 0.1) + (end.size - (start?.size ?? 0.1)) * eased,
+        );
+      });
+      if (t < 1) frameRef.current = requestAnimationFrame(step);
+      else frameRef.current = null;
+    };
+    frameRef.current = requestAnimationFrame(step);
+
+    sigma.getCamera().animate(
+      { x: 0.5, y: 0.5, ratio: 1, angle: 0 },
+      { duration: survivors.length > 0 ? TRANSITION_MS : 0 },
+    );
+  }, [spec, ready]);
+
+  // The reveal, the ripple, and the relevance hierarchy are all reducers over
   // precomputed state — the renderer decides nothing, it only choreographs.
   useEffect(() => {
     const sigma = sigmaRef.current;
@@ -154,10 +303,18 @@ export default function GraphCanvas() {
     }
     const rippleActive = rippleFor !== null && graph.hasNode(rippleFor);
 
-    const neighbourhood = new Set<string>();
+    // The relevance hierarchy: direct neighbours, then everything one hop
+    // further out. Second degree is what turns a selection from a star into a
+    // readable neighbourhood — it shows the shape of what the change touches.
+    const direct = new Set<string>();
+    const second = new Set<string>();
     if (!rippleActive && selectedId && graph.hasNode(selectedId)) {
-      neighbourhood.add(selectedId);
-      for (const neighbour of graph.neighbors(selectedId)) neighbourhood.add(neighbour);
+      for (const neighbour of graph.neighbors(selectedId)) direct.add(neighbour);
+      for (const neighbour of direct) {
+        for (const outer of graph.neighbors(neighbour)) {
+          if (outer !== selectedId && !direct.has(outer)) second.add(outer);
+        }
+      }
     }
 
     sigma.setSetting("nodeReducer", (node, data) => {
@@ -188,36 +345,48 @@ export default function GraphCanvas() {
       }
 
       if (selectedId) {
-        // Focus mode (EXPERIENCE §signature). On a dense graph a slightly
-        // dimmer neighbour is invisible — the selection has to be unmistakable
-        // at a glance, so: the city recedes to near-black, the selected node
-        // becomes a large bright marker with its label forced on, and its
-        // direct world keeps its real colour but is enlarged and labelled.
+        // 100 / 60 / 20 / 5. On a dense graph a slightly dimmer neighbour is
+        // invisible, so the falloff has to be steep enough to read instantly.
+        // Emphasis is added, then capped. A flat multiplier cannot serve both
+        // levels: ×2.2 is the minimum that reads on an L2 file node of 4px,
+        // and turns an L1 district of 40px into a disc that swallows the
+        // screen. Growing by a bounded amount lifts the small case and leaves
+        // the large one recognisable — selection is carried by colour and
+        // label anyway, with size only reinforcing it.
+        const base = data.size as number;
         if (node === selectedId) {
           return {
             ...data,
             color: "#ffffff",
-            size: Math.max((data.size as number) * 2.2, 12),
+            size: base + Math.min(base * 1.2, 9),
             highlighted: true,
+            forceLabel: true,
+            zIndex: 4,
+          };
+        }
+        if (direct.has(node)) {
+          return {
+            ...data,
+            size: base + Math.min(base * 0.5, 4),
             forceLabel: true,
             zIndex: 3,
           };
         }
-        if (neighbourhood.has(node)) {
-          return {
-            ...data,
-            size: Math.max((data.size as number) * 1.5, 6),
-            forceLabel: true,
-            zIndex: 2,
-          };
+        if (second.has(node)) {
+          return { ...data, color: "#334155", label: null, zIndex: 2 };
         }
-        return { ...data, color: "#111a2b", label: null, zIndex: 0 };
+        return { ...data, color: "#0d1524", label: null, zIndex: 0 };
       }
       return { ...data, zIndex: 1 };
     });
 
     sigma.setSetting("edgeReducer", (edge, data) => {
       const [source, target] = graph.extremities(edge);
+      const confidence = data.confidence as string;
+      // Width is confidence's second channel; relevance never touches it, so
+      // a faint distant edge and a faint guess stay distinguishable.
+      const baseSize =
+        (data.baseSize as number) * (CONFIDENCE_WIDTH[confidence] ?? 1);
 
       if (phase === "revealing") {
         const sourceIn =
@@ -233,27 +402,36 @@ export default function GraphCanvas() {
         const targetReached =
           target === rippleFor || (distanceOf.get(target) ?? Infinity) <= rippleFront;
         if (!sourceReached || !targetReached) return { ...data, hidden: true };
-        return { ...data, color: "rgba(251,146,60,0.5)", size: (data.size as number) * 1.4 };
+        // The wave owns the colour here — impact is the message, not provenance.
+        return { ...data, size: baseSize * 1.4, color: "rgba(251,146,60,0.5)" };
       }
 
       if (selectedId) {
-        if (!neighbourhood.has(source) || !neighbourhood.has(target)) {
-          return { ...data, hidden: true };
-        }
-        // Edges touching the selection glow; the ones merely between two
-        // neighbours stay quieter, so the focus reads as a star, not a mesh.
         const touchesSelection = source === selectedId || target === selectedId;
-        return {
-          ...data,
-          color: touchesSelection ? "rgba(125,211,252,0.95)" : "rgba(125,211,252,0.35)",
-          size: (data.size as number) * (touchesSelection ? 2.4 : 1.2),
-        };
+        const withinDirect =
+          (direct.has(source) || source === selectedId) &&
+          (direct.has(target) || target === selectedId);
+        const touchesSecond = second.has(source) || second.has(target);
+
+        // 100 / 60 / 20 / 5 — the hierarchy, in alpha.
+        if (touchesSelection) {
+          return { ...data, color: edgeColor(confidence, 1), size: baseSize * 2.4 };
+        }
+        if (withinDirect) {
+          return { ...data, color: edgeColor(confidence, 0.6), size: baseSize * 1.2 };
+        }
+        if (touchesSecond) {
+          return { ...data, color: edgeColor(confidence, 0.2), size: baseSize };
+        }
+        return { ...data, color: edgeColor(confidence, 0.05), size: baseSize };
       }
-      return data;
+
+      // Resting state: quiet, so that selecting anything is a visible event.
+      return { ...data, color: edgeColor(confidence, 0.22), size: baseSize };
     });
 
     sigma.refresh();
-  }, [phase, revealIndex, selectedId, rippleFor, blast, rippleFront]);
+  }, [phase, revealIndex, selectedId, rippleFor, blast, rippleFront, spec]);
 
   // Drive the ripple clock: the wave expands one distance ring at a time.
   useEffect(() => {
