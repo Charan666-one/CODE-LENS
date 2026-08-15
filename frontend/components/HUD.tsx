@@ -23,6 +23,7 @@ export default function HUD() {
   const overlay = useGraphStore((s) => s.overlay);
   const clearOverlay = useGraphStore((s) => s.clearOverlay);
   const setPalette = useGraphStore((s) => s.setPalette);
+  const setGuide = useGraphStore((s) => s.setGuide);
 
   if (phase !== "exploring" && phase !== "revealing") return null;
 
@@ -35,6 +36,14 @@ export default function HUD() {
       <header className="hud-top">
         <span className="brand">CodeLens</span>
         <span className="repo">{repoName}</span>
+        <button
+          className="guide-open"
+          onClick={() => setGuide(true)}
+          title="What am I looking at?"
+          aria-label="Graph guide"
+        >
+          ⓘ
+        </button>
         <button className="palette-open" onClick={() => setPalette(true)}>
           <span className="kbd">⌘K</span>
         </button>

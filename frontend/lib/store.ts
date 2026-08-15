@@ -86,6 +86,12 @@ interface GraphState {
   paletteOpen: boolean;
   setPalette: (open: boolean) => void;
 
+  /** The Graph Guide. Shown once unprompted on a first graph, then on
+   *  request only — L1/L2/L3 is the least self-explanatory thing here and
+   *  the explanation is worth exactly one interruption. */
+  guideOpen: boolean;
+  setGuide: (open: boolean) => void;
+
   /** The dive. Going a level deeper *at a place* rather than switching a tab:
    *  the camera holds the district you opened while the new level assembles
    *  around it, so L1 → L2 → L3 reads as travel instead of navigation.
@@ -268,6 +274,9 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
   paletteOpen: false,
   setPalette: (open) => set({ paletteOpen: open }),
+
+  guideOpen: false,
+  setGuide: (open) => set({ guideOpen: open }),
 
   pendingFocus: null,
   consumeFocus: () => set({ pendingFocus: null }),

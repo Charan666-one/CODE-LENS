@@ -3,6 +3,7 @@
 import dynamic from "next/dynamic";
 import HeroInput from "@/components/HeroInput";
 import CommandPalette from "@/components/CommandPalette";
+import GraphGuide from "@/components/GraphGuide";
 import HUD from "@/components/HUD";
 import NodeInspector from "@/components/NodeInspector";
 import UnderstandingOverlay from "@/components/UnderstandingOverlay";
@@ -21,6 +22,7 @@ export default function Home() {
       <HUD />
       <NodeInspector />
       <CommandPalette />
+      <GraphGuide />
     </main>
   );
 }
