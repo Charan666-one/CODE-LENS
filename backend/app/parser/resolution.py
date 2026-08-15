@@ -275,23 +275,42 @@ def _build_import_map(facts: FileFacts, table: SymbolTable, emit: EmitEdge) -> I
             if head:
                 import_map[head] = (head, True)
             import_map[target_module] = (target_module, True)
-            _emit_import_edge(facts, table, target_module, raw.line, emit)
+            _emit_import_edge(facts, table, target_module, raw.line, emit, type_only=raw.type_only)
             continue
 
         if len(raw.names) == 1 and raw.names[0][0] == "":  # `import a.b as c`
             import_map[raw.names[0][1]] = (target_module, True)
-            _emit_import_edge(facts, table, target_module, raw.line, emit)
+            _emit_import_edge(facts, table, target_module, raw.line, emit, type_only=raw.type_only)
             continue
 
         # `from module import name[, name as alias]`
-        _emit_import_edge(facts, table, target_module, raw.line, emit)
+        submodules: list[str] = []
         for original, alias in raw.names:
             candidate = f"{target_module}.{original}" if target_module else original
             is_module = table.module_path(candidate) is not None
             import_map[alias] = (candidate, is_module)
             if is_module:
-                # `from package import submodule` depends on the submodule's file
-                _emit_import_edge(facts, table, candidate, raw.line, emit)
+                submodules.append(candidate)
+
+        if submodules:
+            # `from . import cli` depends on `flask.cli`. It also *executes*
+            # `flask/__init__.py` on the way, but that is a module-loading
+            # detail rather than an architectural relationship — and recording
+            # it made every Python package with a re-exporting `__init__`
+            # look circular, because `__init__` imports the submodule right
+            # back. Flask reported 20 cycles, essentially all of this shape.
+            # The submodule is the dependency the author expressed; that is
+            # the edge worth keeping.
+            for candidate in submodules:
+                _emit_import_edge(
+                    facts, table, candidate, raw.line, emit, type_only=raw.type_only
+                )
+        else:
+            # `from .app import Flask` — the names are symbols, so the file
+            # that defines them is the dependency.
+            _emit_import_edge(
+                facts, table, target_module, raw.line, emit, type_only=raw.type_only
+            )
 
     return import_map
 
@@ -317,7 +336,13 @@ def _relative_base(module_qname: str, is_package: bool, level: int) -> str:
 
 
 def _emit_import_edge(
-    facts: FileFacts, table: SymbolTable, module_qname: str, line: int, emit: EmitEdge
+    facts: FileFacts,
+    table: SymbolTable,
+    module_qname: str,
+    line: int,
+    emit: EmitEdge,
+    *,
+    type_only: bool = False,
 ) -> None:
     path = table.module_path(module_qname)
     if path is None:  # third-party or stdlib: Layer B, not Layer A
@@ -332,6 +357,7 @@ def _emit_import_edge(
             kind=EdgeKind.IMPORTS,
             file_path=facts.path,
             line=line,
+            type_only=type_only,
         )
     )
 

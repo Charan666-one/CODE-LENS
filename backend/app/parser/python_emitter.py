@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 
 import tree_sitter_python
@@ -58,6 +58,9 @@ class _Context:
     container_id: str  # node that CONTAINS definitions found here
     scope_id: str  # node a call site at this level is attributed to
     class_qname: str | None  # innermost enclosing class, for `self.`/`super()`
+    #: Inside an `if TYPE_CHECKING:` block, where imports are for the type
+    #: checker only and are erased at runtime.
+    type_only: bool = False
 
 
 class PythonEmitter:
@@ -115,7 +118,7 @@ class _FileWalker:
         kind = node.type
 
         if kind in ("import_statement", "import_from_statement"):
-            self._record_import(node)
+            self._record_import(node, ctx)
             return
         if kind == "decorated_definition":
             self._visit_decorated(node, ctx)
@@ -125,6 +128,13 @@ class _FileWalker:
             return
         if kind == "if_statement" and self._is_main_guard(node):
             self._visit_main_guard(node, ctx)
+            return
+        if kind == "if_statement" and self._is_type_checking_guard(node):
+            # Everything in here is for the type checker and gone at runtime.
+            inner = replace(ctx, type_only=True)
+            for child in node.children:
+                if child.is_named:
+                    self.visit(child, inner)
             return
         if kind == "assignment":
             self._record_router(node)
@@ -269,7 +279,7 @@ class _FileWalker:
 
     # ── recording ─────────────────────────────────────────────────────────
 
-    def _record_import(self, node: TSNode) -> None:
+    def _record_import(self, node: TSNode, ctx: _Context) -> None:
         line = node.start_point[0] + 1
 
         if node.type == "import_statement":
@@ -277,7 +287,8 @@ class _FileWalker:
                 if child.type == "dotted_name" and child.text is not None:
                     module = child.text.decode("utf-8", errors="replace")
                     self.facts.imports.append(
-                        RawImport(module=module, level=0, names=[], line=line)
+                        RawImport(module=module, level=0, names=[], line=line,
+                                  type_only=ctx.type_only)
                     )
                 elif child.type == "aliased_import":
                     name_node = child.child_by_field_name("name")
@@ -290,7 +301,8 @@ class _FileWalker:
                             else module
                         )
                         self.facts.imports.append(
-                            RawImport(module=module, level=0, names=[("", alias)], line=line)
+                            RawImport(module=module, level=0, names=[("", alias)], line=line,
+                                      type_only=ctx.type_only)
                         )
             return
 
@@ -323,7 +335,8 @@ class _FileWalker:
                     names.append((original, alias))
 
         self.facts.imports.append(
-            RawImport(module=module, level=level, names=names, line=line)
+            RawImport(module=module, level=level, names=names, line=line,
+                      type_only=ctx.type_only)
         )
 
     def _record_call(self, node: TSNode, ctx: _Context) -> None:
@@ -374,6 +387,20 @@ class _FileWalker:
                 found.append(current)
             stack.extend(child for child in current.children if child.is_named)
         return found
+
+    def _is_type_checking_guard(self, node: TSNode) -> bool:
+        """`if TYPE_CHECKING:` / `if t.TYPE_CHECKING:` — the standard idiom for
+        importing a name for annotations only.
+
+        It matters because it is specifically how a circular import gets
+        *broken*: Flask's config.py imports App this way precisely so that
+        sansio/app.py can import Config at runtime. Treating it as an ordinary
+        import made this tool report that fix as a circular dependency."""
+        condition = node.child_by_field_name("condition")
+        if condition is None or condition.text is None:
+            return False
+        text = condition.text.decode("utf-8", errors="replace").strip()
+        return text == "TYPE_CHECKING" or text.endswith(".TYPE_CHECKING")
 
     def _is_main_guard(self, node: TSNode) -> bool:
         condition = node.child_by_field_name("condition")

@@ -39,6 +39,7 @@ class GraphView:
                 file_path=edge.file_path,
                 line=edge.line,
                 weight=edge.weight,
+                type_only=edge.type_only,
             )
 
     # ── basics ────────────────────────────────────────────────────────────

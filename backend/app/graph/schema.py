@@ -118,6 +118,14 @@ class Edge(BaseModel):
     confidence: CallConfidence = CallConfidence.RESOLVED
     # Only meaningful for CO_CHANGES (co-change strength) — post-MVP:
     weight: float | None = None
+    #: True for imports that exist only for type checkers — Python's
+    #: `if TYPE_CHECKING:` block and TypeScript's `import type`. They are real
+    #: source dependencies (changing the target's signature changes the
+    #: annotations here) and so remain IMPORTS edges, but they do not exist at
+    #: runtime, and the idiom is specifically how a circular import is
+    #: *broken*. Anything reasoning about cycles must exclude them or it
+    #: reports the fix as the problem.
+    type_only: bool = False
 
 
 # ── Semantic layer (derived — never mixed with facts) ────────────────────

@@ -26,6 +26,9 @@ class RawImport:
     level: int  # 0 = absolute, 1 = `.`, 2 = `..`
     names: list[tuple[str, str]]  # (original, local_alias); empty => plain `import m`
     line: int
+    #: Seen under `if TYPE_CHECKING:` / written as `import type` — a real
+    #: source dependency that does not exist at runtime. See Edge.type_only.
+    type_only: bool = False
 
 
 @dataclass

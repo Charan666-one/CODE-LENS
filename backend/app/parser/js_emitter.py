@@ -473,6 +473,17 @@ class _JsWalker:
         if target is None:
             return  # bare specifier: external package, Layer B's business
 
+        # `import type { X } from './y'` — erased by the compiler, and the
+        # TypeScript equivalent of Python's `if TYPE_CHECKING:` block. It is a
+        # real source dependency but not a runtime one, and it is how a
+        # circular import is broken rather than an instance of one.
+        # tree-sitter exposes the modifier as a bare `type` keyword child, and
+        # per-specifier `{ type X }` shows up the same way inside the clause.
+        statement = node.text.decode("utf-8", errors="replace") if node.text else ""
+        type_only = statement.startswith("import type") or statement.startswith(
+            "export type"
+        )
+
         names: list[tuple[str, str]] = []
         for clause in node.children:
             if clause.type != "import_clause":
@@ -504,14 +515,17 @@ class _JsWalker:
 
         if not names:  # side-effect import: `import './setup.js'`
             self.facts.imports.append(
-                RawImport(module=target, level=0, names=[], line=line)
+                RawImport(module=target, level=0, names=[], line=line, type_only=type_only)
             )
             return
         for original, alias in names:
             if original == "":
                 # module-object binding (default/namespace): alias -> module
                 self.facts.imports.append(
-                    RawImport(module=target, level=0, names=[("", alias)], line=line)
+                    RawImport(
+                        module=target, level=0, names=[("", alias)], line=line,
+                        type_only=type_only,
+                    )
                 )
             else:
                 self.facts.imports.append(
