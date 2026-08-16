@@ -20,16 +20,18 @@ always, removes the failure mode instead of chasing its symptoms.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.core import jobs
 from app.core.config import settings
 from app.core.graph_cache import cache
+from app.core.limits import ConcurrencyGate, RateLimiter, reclaim_clone_cache
 from app.core.pipeline import StageReport, run_pipeline
 from app.graph.store import SQLiteGraphStore
 from app.ingestion import IngestionError, looks_like_remote
@@ -37,7 +39,16 @@ from app.ingestion.clone import normalize_repo_url
 from app.queries import QueryError, registered_queries, run_query
 from app.views.viewspec import compile_viewspec
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api", tags=["CodeLens"])
+
+#: Module-level so the counters live for the process, not the request. See
+#: core/limits.py for what each one defends against.
+rate_limiter = RateLimiter(
+    settings.RATE_LIMIT_ANALYSES, settings.RATE_LIMIT_WINDOW_SECONDS
+)
+analysis_gate = ConcurrencyGate(settings.MAX_CONCURRENT_ANALYSES)
 
 
 def get_store() -> SQLiteGraphStore:
@@ -74,7 +85,7 @@ class JobStatusResponse(BaseModel):
 
 
 @router.post("/analyze", response_model=AnalyzeAccepted, status_code=202)
-def analyze(request: AnalyzeRequest) -> AnalyzeAccepted:
+def analyze(request: AnalyzeRequest, http_request: Request) -> AnalyzeAccepted:
     """Validate and kick off analysis; return a job id immediately.
 
     Validation (the trust boundary, and a malformed URL) still happens
@@ -102,6 +113,41 @@ def analyze(request: AnalyzeRequest) -> AnalyzeAccepted:
     if already_running is not None:
         return AnalyzeAccepted(job_id=already_running.id, status=already_running.status)
 
+    # Limits apply only past the dedupe check above. Asking twice for a repo
+    # already being analysed is one question, and charging a client's quota
+    # for the same answer twice would penalise exactly the double-click the
+    # dedupe exists to absorb.
+    #
+    # **Capacity before quota, deliberately.** The other order is the obvious
+    # one and it is unfair: a caller refused with 503 because the server is
+    # saturated would have had their quota decremented for work that never
+    # ran, so a busy machine silently spends the quota of everyone who arrives
+    # while it is busy. Whether the server has room is the server's business
+    # and is settled first; how often this client may ask is settled second,
+    # and only for a request that would otherwise have proceeded.
+    if not analysis_gate.try_acquire():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Busy: {analysis_gate.limit} analyses already running. "
+                "Each one is a clone and a full parse. Try again shortly."
+            ),
+            headers={"Retry-After": "30"},
+        )
+
+    retry_after = rate_limiter.check(_client_key(http_request))
+    if retry_after is not None:
+        analysis_gate.release()  # never hold a slot for work that will not run
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Rate limit: {settings.RATE_LIMIT_ANALYSES} analyses per "
+                f"{settings.RATE_LIMIT_WINDOW_SECONDS // 60} minutes. "
+                f"Try again in {int(retry_after) + 1}s."
+            ),
+            headers={"Retry-After": str(int(retry_after) + 1)},
+        )
+
     job = jobs.registry.create(key=str(source))
 
     def work() -> None:
@@ -116,27 +162,72 @@ def analyze(request: AnalyzeRequest) -> AnalyzeAccepted:
                 },
             )
 
-        result = run_pipeline(
-            source,
-            get_store(),
-            max_size_mb=settings.MAX_REPO_SIZE_MB,
-            on_progress=on_progress,
-        )
-        jobs.registry.update(
-            job.id,
-            status="done",
-            result={
-                "snapshot_id": result.snapshot_id,
-                "repo_url": result.graph.snapshot.repo_url,
-                "commit_sha": result.graph.snapshot.commit_sha,
-                "skipped": result.skipped,
-                "nodes": len(result.graph.nodes),
-                "edges": len(result.graph.edges),
-            },
-        )
+        try:
+            result = run_pipeline(
+                source,
+                get_store(),
+                max_size_mb=settings.MAX_REPO_SIZE_MB,
+                on_progress=on_progress,
+            )
+            jobs.registry.update(
+                job.id,
+                status="done",
+                result={
+                    "snapshot_id": result.snapshot_id,
+                    "repo_url": result.graph.snapshot.repo_url,
+                    "commit_sha": result.graph.snapshot.commit_sha,
+                    "skipped": result.skipped,
+                    "nodes": len(result.graph.nodes),
+                    "edges": len(result.graph.edges),
+                },
+            )
+        finally:
+            # The slot must come back on *every* path. `run_in_background`
+            # turns an exception into the job's error rather than a crash, so
+            # a failure here is silent — and a silent leak of the one thing
+            # limiting concurrency ends with a permanently "busy" service
+            # that has nothing running.
+            analysis_gate.release()
+            _reclaim_clone_cache()
 
     jobs.registry.run_in_background(job.id, work)
     return AnalyzeAccepted(job_id=job.id)
+
+
+def _client_key(request: Request) -> str:
+    """Who to charge the quota to.
+
+    Behind a proxy the socket address is the proxy, so every client would
+    share one bucket and the first five analyses would lock out everyone.
+    `X-Forwarded-For`'s left-most entry is the original client where a proxy
+    sets it. It is also trivially spoofable by a direct caller, which is
+    the accepted trade: this is an abuse *speed bump* on a demo instance, not
+    an authentication boundary, and saying so is better than implying a
+    strength it does not have.
+    """
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _reclaim_clone_cache() -> None:
+    """Keep the clone directory under its ceiling. Best-effort, never fatal.
+
+    Runs after each analysis rather than on a timer: the cache only grows
+    when an analysis adds to it, so that is exactly when it needs checking,
+    and it keeps the whole mechanism free of a background scheduler.
+    """
+    try:
+        removed = reclaim_clone_cache(
+            settings.CLONE_DIR,
+            settings.MAX_CLONE_CACHE_MB,
+            keep={Path(key).name for key in jobs.registry.active_keys()},
+        )
+        if removed:
+            logger.info("reclaimed %d cached clone(s): %s", len(removed), ", ".join(removed))
+    except OSError as exc:  # a full or read-only volume must not fail the job
+        logger.warning("clone cache reclaim failed: %s", exc)
 
 
 @router.get("/analyze/{job_id}", response_model=JobStatusResponse)

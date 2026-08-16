@@ -32,6 +32,37 @@ class Settings(BaseSettings):
     MAX_REPO_SIZE_MB: int = 500
     CLONE_TIMEOUT_SECONDS: int = 300
 
+    # ── Serving ───────────────────────────────────────────────────────────
+    #: Browser origins allowed to call this API. The default is the local
+    #: frontend; a deployment must set its own, and setting `*` alongside
+    #: credentialled requests is rejected by browsers anyway.
+    #: Comma-separated in the environment: `CORS_ORIGINS=https://a,https://b`.
+    CORS_ORIGINS: str = "http://localhost:3000"
+
+    # ── Public-instance limits ────────────────────────────────────────────
+    # This API clones whatever repository it is handed. On a machine only its
+    # author can reach that is fine; on a public one it is disk, CPU and
+    # network on someone else's terms, so every one of these has a ceiling.
+    #
+    #: Analyze requests one client may start per window. Polling job status
+    #: is unmetered — that is the whole point of the async design.
+    RATE_LIMIT_ANALYSES: int = 5
+    RATE_LIMIT_WINDOW_SECONDS: int = 300
+    #: Pipelines running at once, across all clients. Each one is a clone
+    #: plus a full parse; without a cap, ten simultaneous monorepos is a
+    #: machine that stops answering its own health check.
+    MAX_CONCURRENT_ANALYSES: int = 2
+    #: Clone cache ceiling. Old working trees are reclaimed oldest-first once
+    #: the directory exceeds this. Nothing else ever deletes them.
+    MAX_CLONE_CACHE_MB: int = 4_000
+    #: Finished jobs kept for polling. The registry is a dict that only ever
+    #: grew; a long-lived process would hold every job it had ever run.
+    MAX_FINISHED_JOBS: int = 200
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+
     # ── Semantic layer (Stage 3) ──────────────────────────────────────────
     # Unset until CP-3.2. Absence must never break the graph pipeline.
     ANTHROPIC_API_KEY: str | None = None

@@ -1,0 +1,65 @@
+# CodeLens, whole, in one command:
+#
+#     docker compose up --build
+#     open http://localhost:3000
+#
+# The backend is deliberately **not** published to the host. Every browser
+# request goes to the frontend, which proxies /api through Next's rewrite to
+# `backend:8000` on the internal network — so there is one public port, no
+# CORS grant to maintain, and no second thing to firewall. Uncomment the
+# backend `ports` block only when you want to poke the API directly.
+
+services:
+  backend:
+    build:
+      context: ./backend
+    environment:
+      # Reached over the compose network by service name, so nothing here
+      # depends on the host's ports.
+      SQLITE_PATH: /data/codelens.db
+      CLONE_DIR: /var/cache/codelens
+      # Only the Next server calls this API, and it does so server-side where
+      # CORS does not apply. Leaving the browser origin here anyway costs
+      # nothing and keeps direct-from-browser debugging working.
+      CORS_ORIGINS: http://localhost:3000
+      # Ceilings for a small public instance. Raise them for a private one;
+      # see backend/app/core/limits.py for what each one defends against.
+      RATE_LIMIT_ANALYSES: 5
+      RATE_LIMIT_WINDOW_SECONDS: 300
+      MAX_CONCURRENT_ANALYSES: 2
+      MAX_CLONE_CACHE_MB: 4000
+      MAX_REPO_SIZE_MB: 500
+      # Optional. The graph, every query and every number in LEDGER.md are
+      # deterministic and need no key; this only enables narration.
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      # Analysed graphs. Losing this means re-analysing everything.
+      - codelens-data:/data
+      # Clone cache. Losing it is only slow, never wrong — which is why it is
+      # a separate volume that can be dropped without touching the graphs.
+      - codelens-clones:/var/cache/codelens
+    # ports:
+    #   - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      # Baked at build time, not read at runtime: Next resolves rewrite
+      # destinations when the config is loaded, so this cannot be an
+      # environment variable on the running container.
+      args:
+        CODELENS_API_URL: http://backend:8000
+    environment:
+      CODELENS_API_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  codelens-data:
+  codelens-clones:

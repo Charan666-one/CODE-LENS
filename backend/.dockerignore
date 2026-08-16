@@ -1,0 +1,14 @@
+# Everything the image builds for itself, plus everything it must never carry.
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# Secrets. The image reads configuration from the environment; a baked .env
+# is a credential shipped to every registry the image reaches.
+.env
+# Local state. These are volumes at runtime — copying a developer's database
+# into the image would serve their analysed repos to everyone.
+data/
+tests/

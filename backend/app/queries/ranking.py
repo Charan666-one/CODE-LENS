@@ -162,9 +162,14 @@ class GraphHistory:
         """
         if self._strength is not None:
             return
+        # `memo` is typed `dict[str, object]`, so what comes back has to be
+        # narrowed rather than asserted — a cast here would hide a genuine
+        # key collision with another subsystem's memo entry.
         cached = self._view.memo.get(self.MEMO_KEY)
-        if cached is not None:
-            self._strength, self._churn = cached  # type: ignore[assignment]
+        if isinstance(cached, tuple) and len(cached) == 2:
+            strength_cache, churn_cache = cached
+            self._strength = strength_cache
+            self._churn = churn_cache
             return
         strength: dict[tuple[str, str], float] = {}
         churn: dict[str, int] = {}

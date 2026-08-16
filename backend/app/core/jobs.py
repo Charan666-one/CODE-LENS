@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from app.core.config import settings
+
 JobStatus = Literal["pending", "running", "done", "error"]
 
 
@@ -45,15 +47,47 @@ class Job:
 class JobRegistry:
     """Thread-safe in-memory store of one process's running jobs."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_finished: int = 200) -> None:
         self._jobs: dict[str, Job] = {}
+        self._max_finished = max_finished
         self._lock = threading.Lock()
 
     def create(self, key: str | None = None) -> Job:
         job = Job(id=uuid.uuid4().hex, key=key)
         with self._lock:
             self._jobs[job.id] = job
+            self._evict_finished()
         return job
+
+    def _evict_finished(self) -> None:
+        """Drop the oldest finished jobs past the cap. Caller holds the lock.
+
+        This table only ever grew. A process serving a public URL would hold
+        every job it had ever run — each with its stage list and result —
+        for as long as it stayed up, which is a slow leak that looks like
+        nothing until it looks like an OOM.
+
+        Only `done` and `error` are evictable: a pending or running job is
+        the one thing a client is actively polling for, and dropping it would
+        answer a legitimate poll with 404 while the work continued invisibly.
+        """
+        finished = [
+            job for job in self._jobs.values() if job.status in ("done", "error")
+        ]
+        if len(finished) <= self._max_finished:
+            return
+        finished.sort(key=lambda job: job.created_at)
+        for job in finished[: len(finished) - self._max_finished]:
+            self._jobs.pop(job.id, None)
+
+    def active_keys(self) -> set[str]:
+        """Sources with a job still in flight — what must not be reclaimed."""
+        with self._lock:
+            return {
+                job.key
+                for job in self._jobs.values()
+                if job.key and job.status in ("pending", "running")
+            }
 
     def find_active(self, key: str) -> Job | None:
         """A pending or running job for the same source, if one exists.
@@ -112,4 +146,4 @@ class JobRegistry:
         threading.Thread(target=_runner, daemon=True).start()
 
 
-registry = JobRegistry()
+registry = JobRegistry(max_finished=settings.MAX_FINISHED_JOBS)

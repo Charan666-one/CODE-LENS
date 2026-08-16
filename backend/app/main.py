@@ -16,9 +16,13 @@ def create_app() -> FastAPI:
         redoc_url="/api/redoc",
     )
 
+    # Origins come from configuration, not from this line. Hardcoding
+    # localhost meant the API worked on exactly one machine and failed with a
+    # browser-side CORS error — the kind that looks like a frontend bug — the
+    # moment it was served from anywhere else.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000"],
+        allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

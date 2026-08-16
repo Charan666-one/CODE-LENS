@@ -1,12 +1,22 @@
+// Where the FastAPI process lives, as seen *from the Next server* — not from
+// the browser. That distinction is the whole reason this is a rewrite: the
+// browser only ever talks to this origin, so the backend needs no public
+// hostname, no CORS grant, and no exposed port. Under compose the value is a
+// service name (`http://backend:8000`); on a host it is localhost.
+const API_ORIGIN = process.env.CODELENS_API_URL ?? "http://127.0.0.1:8000";
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Produces a self-contained server bundle with only the modules actually
+  // imported, so the runtime image needs no node_modules copy.
+  output: "standalone",
   // The frontend renders; the backend computes. Everything under /api is the
-  // FastAPI process — one origin for the browser, no CORS dance in dev.
+  // FastAPI process — one origin for the browser, no CORS dance anywhere.
   async rewrites() {
     return [
       {
         source: "/api/:path*",
-        destination: "http://127.0.0.1:8000/api/:path*",
+        destination: `${API_ORIGIN}/api/:path*`,
       },
     ];
   },

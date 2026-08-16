@@ -31,6 +31,11 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     # must not be handed back by the analyze dedupe — it would run against a
     # database this fixture has since closed.
     jobs.registry.reset()
+    # Limits are per process, and the whole suite is one process behind one
+    # client address — without this the sixth test to analyse anything would
+    # be rate-limited by the fifth. The limits themselves are exercised
+    # deliberately in test_limits.py.
+    routes.rate_limiter.reset()
     with TestClient(app) as test_client:
         yield test_client
     store.close()
