@@ -25,6 +25,17 @@ surprisingly well and involves no graph at all. The report therefore always
 runs that baseline on exactly the same examples. The graph earns its keep
 only by the gap, and if there is no gap, the honest thing is to publish that.
 
+## The leakage this design removes
+
+Two signals the ranking uses — co-change and churn — are derived from git
+history, which is the same history this benchmark grades against. Read off
+the finished graph they include the commit under test, so "these two files
+change together" would be trivially true of the very example being scored.
+`collect_examples` therefore builds a `WindowedHistory` per commit, over
+strictly older commits only. It is the same correction `popularity_baseline`
+needed, for the same reason, and without it the ranking's numbers would look
+excellent and reproduce in production not at all.
+
 ## The leakage this design accepts, and why it is bounded
 
 Predictions use the graph built from the working tree at HEAD, while the
@@ -46,11 +57,19 @@ from __future__ import annotations
 import contextlib
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any
 
 from app.graph.schema import EdgeKind, NodeKind
 from app.graph.traversal import GraphView
 from app.ingestion.git_history import Commit
+from app.queries.ranking import (
+    DEFAULT_WEIGHTS,
+    Candidate,
+    History,
+    Weights,
+    WindowedHistory,
+    candidates_from_ranked,
+    score_candidates,
+)
 
 DEPENDENCY_KINDS = {EdgeKind.CALLS, EdgeKind.IMPORTS}
 
@@ -184,11 +203,58 @@ class BacktestReport:
         return self._mean([float(n) for n in lengths])
 
 
-def _rank_related(view: GraphView, seed_file: str, limit: int) -> list[str]:
-    """Files the graph relates to `seed_file`, nearest first, **both ways**.
+@dataclass(frozen=True)
+class Example:
+    """One graded example with everything that does not depend on the weights.
 
-    Dependents first — that is blast radius, the product's actual claim — then
-    dependencies.
+    Splitting the weight-independent half out is what makes a weight sweep
+    affordable: the graph walks and the history window are computed once per
+    example, and trying a hundred weight vectors is then a hundred passes of
+    arithmetic over lists that already exist. It also guarantees the sweep and
+    the published report grade *identical* examples, which a second
+    example-selection code path would not.
+    """
+
+    commit_index: int
+    seed: str
+    actual: frozenset[str]
+    #: Candidates in each direction, unscored. Dependents are the product's
+    #: claim; dependencies fill the list when dependents run out.
+    dependents: tuple[Candidate, ...]
+    dependencies: tuple[Candidate, ...]
+    history: History
+    #: "Guess the busiest files", already cut to K, on strictly older commits.
+    baseline_prediction: tuple[str, ...]
+
+    def predict(self, k: int, weights: Weights) -> tuple[str, ...]:
+        """Rank this example's candidates under `weights`, best first.
+
+        Each direction is ranked on its own. Merging them into one pool and
+        letting the score sort it would quietly turn "what breaks" and "what
+        this needs" into one undifferentiated list, and they are different
+        claims — the product promises the first. Ranking runs *within* a
+        direction; the direction order is a decision, not a score.
+        """
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for pool in (self.dependents, self.dependencies):
+            if len(ordered) >= k:
+                break
+            fresh = [c for c in pool if c.file_path not in seen]
+            for entry in score_candidates(
+                fresh, seed_file=self.seed, history=self.history, weights=weights
+            ):
+                if len(ordered) >= k:
+                    break
+                seen.add(entry.file_path)
+                ordered.append(entry.file_path)
+        return tuple(ordered)
+
+
+def _candidates_for(view: GraphView, seed_file: str) -> tuple[
+    tuple[Candidate, ...], tuple[Candidate, ...]
+]:
+    """Both directions of what the graph relates to `seed_file`, unranked.
 
     **Why both.** Grading dependents alone was wrong, and the wrongness was
     large. This benchmark asks "the developer changed X; what else did they
@@ -199,10 +265,6 @@ def _rank_related(view: GraphView, seed_file: str, limit: int) -> list[str]:
     files** on both Express and Flask. The reported "39% silence" was
     therefore almost entirely this artifact rather than missing coverage, and
     a whole slice of resolution work was aimed at a gap that was not there.
-
-    Dependents remain first in the ranking because they remain the product's
-    claim; adding the reverse direction makes the *measurement* match the
-    question it asks.
     """
     from app.queries.base import QueryError
     from app.queries.blast_radius import blast_radius
@@ -210,30 +272,78 @@ def _rank_related(view: GraphView, seed_file: str, limit: int) -> list[str]:
 
     node_id = f"{NodeKind.FILE.value}:{seed_file}"
     if not view.has_node(node_id):
-        return []
+        return (), ()
 
-    ordered: list[str] = []
-    seen: set[str] = set()
-
-    def take(ranked: list[Any]) -> None:
-        for entry in ranked:
-            if len(ordered) >= limit:
-                return
-            node = view.node(entry.node_id)
-            if node is None or not node.file_path:
-                continue
-            path = node.file_path
-            if path == seed_file or path in seen:
-                continue
-            seen.add(path)
-            ordered.append(path)
-
+    dependents: list[Candidate] = []
+    dependencies: list[Candidate] = []
     with contextlib.suppress(QueryError):
-        take(blast_radius(view, node_id=node_id).ranked)
-    if len(ordered) < limit:
-        with contextlib.suppress(QueryError):
-            take(dependencies_query(view, node_id=node_id).ranked)
-    return ordered
+        dependents = candidates_from_ranked(
+            view, blast_radius(view, node_id=node_id).ranked, seed_file=seed_file
+        )
+    with contextlib.suppress(QueryError):
+        dependencies = candidates_from_ranked(
+            view, dependencies_query(view, node_id=node_id).ranked, seed_file=seed_file
+        )
+    return tuple(dependents), tuple(dependencies)
+
+
+def collect_examples(
+    view: GraphView,
+    commits: list[Commit],
+    *,
+    k: int = DEFAULT_K,
+    max_examples: int | None = None,
+    max_files_per_commit: int = MAX_FILES_PER_COMMIT,
+) -> tuple[list[Example], int, int]:
+    """Every graded example, plus how many commits were used and skipped.
+
+    `commits` should be newest-first, as `read_log` returns them.
+    """
+    tracked = {
+        node.file_path
+        for node in view.nodes_by_id.values()
+        if node.kind is NodeKind.FILE and node.file_path
+    }
+    examples: list[Example] = []
+    used = 0
+    skipped = 0
+
+    for index, commit in enumerate(commits):
+        touched = sorted({p for p in commit.files if p in tracked})
+        if not (MIN_FILES_PER_COMMIT <= len(touched) <= max_files_per_commit):
+            skipped += 1
+            continue
+        used += 1
+
+        # Recomputed per commit, over strictly older history only. See the
+        # note in popularity_baseline: a shared baseline computed once over
+        # everything can see the future, and scores far too well for it.
+        ranked_baseline = popularity_baseline(commits, tracked, before_index=index)
+        # The same correction, for the same reason, applied to the ranking's
+        # own history signals. Co-change and churn read off the graph are
+        # computed over *all* history — including this commit. A ranking using
+        # them here would be told the answer: "these two files change
+        # together" is trivially true of the commit being graded, and the
+        # score would look excellent and reproduce in production not at all.
+        history = WindowedHistory(commits, before_index=index)
+
+        for seed in touched:
+            dependents, dependencies = _candidates_for(view, seed)
+            examples.append(
+                Example(
+                    commit_index=index,
+                    seed=seed,
+                    actual=frozenset(touched) - {seed},
+                    dependents=dependents,
+                    dependencies=dependencies,
+                    history=history,
+                    baseline_prediction=tuple(p for p in ranked_baseline if p != seed)[:k],
+                )
+            )
+            if max_examples is not None and len(examples) >= max_examples:
+                return examples, used, skipped
+
+    return examples, used, skipped
 
 
 def popularity_baseline(
@@ -270,53 +380,62 @@ def backtest(
     k: int = DEFAULT_K,
     max_examples: int | None = None,
     max_files_per_commit: int = MAX_FILES_PER_COMMIT,
+    weights: Weights = DEFAULT_WEIGHTS,
 ) -> BacktestReport:
     """Grade blast radius against what developers actually changed together.
 
     `commits` should be newest-first, as `read_log` returns them.
     """
-    tracked = {
-        node.file_path
-        for node in view.nodes_by_id.values()
-        if node.kind is NodeKind.FILE and node.file_path
-    }
-    report = BacktestReport(k=k, examples=0, commits_used=0, commits_skipped=0)
+    examples, used, skipped = collect_examples(
+        view,
+        commits,
+        k=k,
+        max_examples=max_examples,
+        max_files_per_commit=max_files_per_commit,
+    )
+    return grade(examples, k=k, weights=weights, commits_used=used, commits_skipped=skipped)
 
-    for index, commit in enumerate(commits):
-        touched = sorted({p for p in commit.files if p in tracked})
-        if not (MIN_FILES_PER_COMMIT <= len(touched) <= max_files_per_commit):
-            report.commits_skipped += 1
-            continue
-        report.commits_used += 1
 
-        # Recomputed per commit, over strictly older history only. See the
-        # note in popularity_baseline: a shared baseline computed once over
-        # everything can see the future, and scores far too well for it.
-        ranked_baseline = popularity_baseline(commits, tracked, before_index=index)
+def grade(
+    examples: list[Example],
+    *,
+    k: int = DEFAULT_K,
+    weights: Weights = DEFAULT_WEIGHTS,
+    commits_used: int = 0,
+    commits_skipped: int = 0,
+) -> BacktestReport:
+    """Score already-collected examples under one set of weights.
 
-        for seed in touched:
-            actual = frozenset(touched) - {seed}
-            predicted = tuple(_rank_related(view, seed, k))
-            if not predicted:
-                # No prediction at all is not a wrong prediction, but it is
-                # not a right one either — it counts as an example with zero
-                # hits, because silently dropping the hard cases is how a
-                # benchmark ends up flattering itself.
-                report.predictions.append(
-                    ScoredPrediction(index, seed, actual, (), 0, None)
-                )
-            else:
-                report.predictions.append(
-                    _score(index, seed, actual, predicted)
-                )
-
-            base = tuple(p for p in ranked_baseline if p != seed)[:k]
-            report.baseline.append(_score(index, seed, actual, base))
-
-            report.examples += 1
-            if max_examples is not None and report.examples >= max_examples:
-                return report
-
+    Separate from `collect_examples` so a weight search re-grades the same
+    examples instead of rebuilding them, and so the search cannot accidentally
+    grade a different population than the published report does.
+    """
+    report = BacktestReport(
+        k=k, examples=0, commits_used=commits_used, commits_skipped=commits_skipped
+    )
+    for example in examples:
+        predicted = example.predict(k, weights)
+        if not predicted:
+            # No prediction at all is not a wrong prediction, but it is not a
+            # right one either — it counts as an example with zero hits,
+            # because silently dropping the hard cases is how a benchmark ends
+            # up flattering itself.
+            report.predictions.append(
+                ScoredPrediction(example.commit_index, example.seed, example.actual, (), 0, None)
+            )
+        else:
+            report.predictions.append(
+                _score(example.commit_index, example.seed, example.actual, predicted)
+            )
+        report.baseline.append(
+            _score(
+                example.commit_index,
+                example.seed,
+                example.actual,
+                example.baseline_prediction,
+            )
+        )
+        report.examples += 1
     return report
 
 
