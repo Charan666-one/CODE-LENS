@@ -31,6 +31,19 @@ class Settings(BaseSettings):
     CLONE_DIR: Path = Path("/tmp/codelens")
     MAX_REPO_SIZE_MB: int = 500
     CLONE_TIMEOUT_SECONDS: int = 300
+    #: Largest single file the inventory will read. Every file is read whole
+    #: into memory to hash and sniff it, so without a ceiling one generated
+    #: 2 GB .ts file is 2 GB of resident memory — a repository well under the
+    #: total size limit can still be an OOM.
+    MAX_FILE_SIZE_MB: int = 4
+    #: Most files one repository may contribute. Total size does not bound
+    #: this: half a million tiny files fit comfortably under 500 MB and each
+    #: one still costs a parse, a hash and a node.
+    MAX_FILES: int = 50_000
+    #: Wall-clock ceiling on one analysis, clone included. Without it a
+    #: pathological repository holds a concurrency slot forever, and two of
+    #: them wedge the service permanently.
+    ANALYSIS_TIMEOUT_SECONDS: int = 900
 
     # ── Serving ───────────────────────────────────────────────────────────
     #: Browser origins allowed to call this API. The default is the local
@@ -48,6 +61,11 @@ class Settings(BaseSettings):
     #: is unmetered — that is the whole point of the async design.
     RATE_LIMIT_ANALYSES: int = 5
     RATE_LIMIT_WINDOW_SECONDS: int = 300
+    #: Narrated answers per client per window. These spend the operator's LLM
+    #: credit one call at a time and start no expensive work, so they are
+    #: metered separately and more generously than analyses — sharing one
+    #: quota would let five narrations lock out an analysis.
+    RATE_LIMIT_NARRATIONS: int = 20
     #: Pipelines running at once, across all clients. Each one is a clone
     #: plus a full parse; without a cap, ten simultaneous monorepos is a
     #: machine that stops answering its own health check.
@@ -58,6 +76,9 @@ class Settings(BaseSettings):
     #: Finished jobs kept for polling. The registry is a dict that only ever
     #: grew; a long-lived process would hold every job it had ever run.
     MAX_FINISHED_JOBS: int = 200
+    #: Largest request body accepted. Every endpoint here takes a small JSON
+    #: object; anything approaching this is a mistake or an attempt.
+    MAX_REQUEST_BODY_BYTES: int = 64 * 1024
 
     @property
     def cors_origins(self) -> list[str]:

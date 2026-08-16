@@ -36,6 +36,41 @@ jobs:
       - name: Tests (pytest)
         run: pytest -q
 
+  audit:
+    name: dependencies (known vulnerabilities)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Audits requirements.txt, NOT the developer's virtualenv. A local venv
+      # accumulates packages that were tried and abandoned — this repo's had
+      # weasyprint, chromadb and aiohttp in it, none of them shipped — and
+      # auditing that reports vulnerabilities in software the image does not
+      # contain while saying nothing about drift in the software it does.
+      - name: Python dependencies (pip-audit)
+        run: |
+          pip install pip-audit
+          pip-audit -r backend/requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # Advisory, not blocking. Next pins its own transitive tree, so a high
+      # finding here is routinely unfixable without a major upgrade, and a
+      # gate nobody can pass is a gate everyone learns to bypass. The output
+      # is read; whether a finding is *reachable* is the judgement call, and
+      # that belongs in review rather than in an exit code.
+      - name: Node dependencies (npm audit)
+        working-directory: frontend
+        run: npm audit --omit=dev || true
+
   images:
     name: images (build · boot · analyse)
     runs-on: ubuntu-latest

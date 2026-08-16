@@ -100,7 +100,8 @@ def ingest(
     destination = Path(workdir) if workdir is not None else settings.CLONE_DIR
     timeout = settings.CLONE_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
 
-    root, repo_url = _acquire(source, destination, timeout)
+    limit = settings.MAX_REPO_SIZE_MB if max_size_mb is None else max_size_mb
+    root, repo_url = _acquire(source, destination, timeout, limit)
     return snapshot_directory(root, repo_url=repo_url, max_size_mb=max_size_mb)
 
 
@@ -136,7 +137,9 @@ def snapshot_directory(
     return IngestedRepo(snapshot=snapshot, root=root, files=files)
 
 
-def _acquire(source: str | Path, workdir: Path, timeout: int) -> tuple[Path, str | None]:
+def _acquire(
+    source: str | Path, workdir: Path, timeout: int, max_size_mb: int
+) -> tuple[Path, str | None]:
     """Resolve any supported source to `(root_directory, canonical_url)`."""
     if isinstance(source, Path):
         return _acquire_local(source, workdir)
@@ -145,7 +148,8 @@ def _acquire(source: str | Path, workdir: Path, timeout: int) -> tuple[Path, str
     if "://" in text or _REMOTE_LIKE.search(text):
         canonical = normalize_repo_url(text)
         destination = Path(workdir) / canonical.rpartition("/")[2]
-        return shallow_clone(canonical, destination, timeout), canonical
+        cloned = shallow_clone(canonical, destination, timeout, max_size_mb=max_size_mb)
+        return cloned, canonical
 
     return _acquire_local(Path(text), workdir)
 

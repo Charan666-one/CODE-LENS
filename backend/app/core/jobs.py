@@ -132,16 +132,68 @@ class JobRegistry:
             if job is not None:
                 job.stages.append(stage)
 
-    def run_in_background(self, job_id: str, fn: Callable[[], None]) -> None:
+    def run_in_background(
+        self,
+        job_id: str,
+        fn: Callable[[], None],
+        *,
+        timeout_seconds: float | None = None,
+        on_timeout: Callable[[], None] | None = None,
+    ) -> None:
         """Run `fn` on a daemon thread; any exception becomes the job's error
-        rather than an unhandled crash with nowhere to surface."""
+        rather than an unhandled crash with nowhere to surface.
+
+        ## The timeout, and what it honestly does
+
+        A Python thread cannot be killed from outside. So when `fn` overruns,
+        this does **not** stop the work — it stops the work from mattering:
+        the job is marked failed so the client gets a real answer instead of
+        polling forever, and `on_timeout` releases the concurrency slot so the
+        service keeps accepting requests.
+
+        That distinction is the whole point. Before this, a repository
+        pathological enough to wedge the parser held its slot indefinitely,
+        and `MAX_CONCURRENT_ANALYSES` of them permanently bricked the
+        instance while every request politely returned 503. Now the machine
+        recovers even though the thread does not.
+
+        **The orphaned thread is a real cost, stated rather than hidden:** it
+        keeps burning CPU until it finishes or the process restarts. Bounding
+        that properly means running the pipeline in a killable subprocess,
+        which is the correct fix and a larger change than this audit should
+        make. The container's CPU limit is what caps the blast radius
+        meanwhile.
+        """
 
         def _runner() -> None:
             self.update(job_id, status="running")
+            timer: threading.Timer | None = None
+            if timeout_seconds is not None:
+                timer = threading.Timer(timeout_seconds, _expire)
+                timer.daemon = True
+                timer.start()
             try:
                 fn()
             except Exception as exc:  # noqa: BLE001 - reported to the client, not swallowed
                 self.update(job_id, status="error", error=str(exc))
+            finally:
+                if timer is not None:
+                    timer.cancel()
+
+        def _expire() -> None:
+            job = self.get(job_id)
+            if job is None or job.status != "running":
+                return
+            self.update(
+                job_id,
+                status="error",
+                error=(
+                    f"Analysis exceeded {timeout_seconds:.0f}s and was abandoned. "
+                    "The repository may be too large or pathologically structured."
+                ),
+            )
+            if on_timeout is not None:
+                on_timeout()
 
         threading.Thread(target=_runner, daemon=True).start()
 

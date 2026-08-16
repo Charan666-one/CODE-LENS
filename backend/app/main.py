@@ -2,6 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.body_limit import BodyLimitMiddleware
 from app.api.routes import router as api_router
 from app.api.semantic_routes import router as semantic_router
 from app.core.config import settings
@@ -15,6 +16,9 @@ def create_app() -> FastAPI:
         docs_url="/api/docs",
         redoc_url="/api/redoc",
     )
+
+    # Outermost: a body is refused before anything else allocates for it.
+    app.add_middleware(BodyLimitMiddleware, max_bytes=settings.MAX_REQUEST_BODY_BYTES)
 
     # Origins come from configuration, not from this line. Hardcoding
     # localhost meant the API worked on exactly one machine and failed with a

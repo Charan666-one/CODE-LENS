@@ -28,10 +28,11 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.api import admission
 from app.core import jobs
 from app.core.config import settings
 from app.core.graph_cache import cache
-from app.core.limits import ConcurrencyGate, RateLimiter, reclaim_clone_cache
+from app.core.limits import reclaim_clone_cache
 from app.core.pipeline import StageReport, run_pipeline
 from app.graph.store import SQLiteGraphStore
 from app.ingestion import IngestionError, looks_like_remote
@@ -42,13 +43,6 @@ from app.views.viewspec import compile_viewspec
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["CodeLens"])
-
-#: Module-level so the counters live for the process, not the request. See
-#: core/limits.py for what each one defends against.
-rate_limiter = RateLimiter(
-    settings.RATE_LIMIT_ANALYSES, settings.RATE_LIMIT_WINDOW_SECONDS
-)
-analysis_gate = ConcurrencyGate(settings.MAX_CONCURRENT_ANALYSES)
 
 
 def get_store() -> SQLiteGraphStore:
@@ -118,35 +112,9 @@ def analyze(request: AnalyzeRequest, http_request: Request) -> AnalyzeAccepted:
     # for the same answer twice would penalise exactly the double-click the
     # dedupe exists to absorb.
     #
-    # **Capacity before quota, deliberately.** The other order is the obvious
-    # one and it is unfair: a caller refused with 503 because the server is
-    # saturated would have had their quota decremented for work that never
-    # ran, so a busy machine silently spends the quota of everyone who arrives
-    # while it is busy. Whether the server has room is the server's business
-    # and is settled first; how often this client may ask is settled second,
-    # and only for a request that would otherwise have proceeded.
-    if not analysis_gate.try_acquire():
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                f"Busy: {analysis_gate.limit} analyses already running. "
-                "Each one is a clone and a full parse. Try again shortly."
-            ),
-            headers={"Retry-After": "30"},
-        )
-
-    retry_after = rate_limiter.check(_client_key(http_request))
-    if retry_after is not None:
-        analysis_gate.release()  # never hold a slot for work that will not run
-        raise HTTPException(
-            status_code=429,
-            detail=(
-                f"Rate limit: {settings.RATE_LIMIT_ANALYSES} analyses per "
-                f"{settings.RATE_LIMIT_WINDOW_SECONDS // 60} minutes. "
-                f"Try again in {int(retry_after) + 1}s."
-            ),
-            headers={"Retry-After": str(int(retry_after) + 1)},
-        )
+    # Acquired here, released in the worker's `finally` — the work outlives
+    # this request, so the context-manager form in admission.py cannot be used.
+    release_slot = admission.acquire(http_request)
 
     job = jobs.registry.create(key=str(source))
 
@@ -181,34 +149,42 @@ def analyze(request: AnalyzeRequest, http_request: Request) -> AnalyzeAccepted:
                     "edges": len(result.graph.edges),
                 },
             )
+        except IngestionError as exc:
+            # Ingestion errors are written for the person who typed the URL —
+            # "not a valid repository", "exceeded the size limit" — and are
+            # safe and useful to return verbatim.
+            jobs.registry.update(job.id, status="error", error=str(exc))
+        except Exception:
+            # Everything else is an internal failure, and `str(exc)` on one of
+            # those is whatever the raising library felt like saying: a
+            # container path, a SQLite file location, a stack-shaped string.
+            # The client gets a job id to quote; the detail goes to the log,
+            # where the operator can read it and a stranger cannot.
+            logger.exception("analysis job %s failed", job.id)
+            jobs.registry.update(
+                job.id,
+                status="error",
+                error=f"Analysis failed unexpectedly (job {job.id}).",
+            )
         finally:
             # The slot must come back on *every* path. `run_in_background`
             # turns an exception into the job's error rather than a crash, so
             # a failure here is silent — and a silent leak of the one thing
             # limiting concurrency ends with a permanently "busy" service
             # that has nothing running.
-            analysis_gate.release()
+            release_slot()
             _reclaim_clone_cache()
 
-    jobs.registry.run_in_background(job.id, work)
+    # `release_slot` is idempotent (admission.acquire), so the timeout path
+    # and the worker's own `finally` can both call it without the double
+    # release silently raising the effective concurrency cap.
+    jobs.registry.run_in_background(
+        job.id,
+        work,
+        timeout_seconds=settings.ANALYSIS_TIMEOUT_SECONDS,
+        on_timeout=release_slot,
+    )
     return AnalyzeAccepted(job_id=job.id)
-
-
-def _client_key(request: Request) -> str:
-    """Who to charge the quota to.
-
-    Behind a proxy the socket address is the proxy, so every client would
-    share one bucket and the first five analyses would lock out everyone.
-    `X-Forwarded-For`'s left-most entry is the original client where a proxy
-    sets it. It is also trivially spoofable by a direct caller, which is
-    the accepted trade: this is an abuse *speed bump* on a demo instance, not
-    an authentication boundary, and saying so is better than implying a
-    strength it does not have.
-    """
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
 
 
 def _reclaim_clone_cache() -> None:

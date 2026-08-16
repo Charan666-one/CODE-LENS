@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api import routes
+from app.api import admission, routes
 from app.core import jobs
 from app.core.graph_cache import cache as graph_cache
 from app.core.limits import (
@@ -39,7 +39,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     monkeypatch.setattr(routes, "_STORE", store)
     graph_cache.clear()
     jobs.registry.reset()
-    routes.rate_limiter.reset()
+    admission.reset()
     with TestClient(app) as test_client:
         yield test_client
     store.close()
@@ -97,7 +97,7 @@ def test_clients_do_not_share_a_bucket() -> None:
 def test_analyze_returns_429_with_retry_after(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(routes, "rate_limiter", RateLimiter(limit=1, window_seconds=60))
+    monkeypatch.setattr(admission, "rate_limiter", RateLimiter(limit=1, window_seconds=60))
 
     first = client.post("/api/analyze", json={"source": str(TINY_PYTHON)})
     assert first.status_code == 202
@@ -118,7 +118,7 @@ def test_asking_twice_for_the_same_repo_costs_one_analysis(
     Charging it would penalise exactly the accident the dedupe was added to
     absorb, and the client gets the same job id either way.
     """
-    monkeypatch.setattr(routes, "rate_limiter", RateLimiter(limit=1, window_seconds=60))
+    monkeypatch.setattr(admission, "rate_limiter", RateLimiter(limit=1, window_seconds=60))
 
     first = client.post("/api/analyze", json={"source": str(TINY_PYTHON)})
     second = client.post("/api/analyze", json={"source": str(TINY_PYTHON)})
@@ -158,7 +158,7 @@ def test_analyze_returns_503_when_saturated(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     saturated = ConcurrencyGate(limit=0)
-    monkeypatch.setattr(routes, "analysis_gate", saturated)
+    monkeypatch.setattr(admission, "analysis_gate", saturated)
 
     response = client.post("/api/analyze", json={"source": str(TINY_PYTHON)})
     assert response.status_code == 503
@@ -175,14 +175,14 @@ def test_being_refused_for_a_busy_server_costs_no_quota(
     requests refused with 503 had silently consumed two of five analyses.
     """
     limiter = RateLimiter(limit=2, window_seconds=600)
-    monkeypatch.setattr(routes, "rate_limiter", limiter)
-    monkeypatch.setattr(routes, "analysis_gate", ConcurrencyGate(limit=0))
+    monkeypatch.setattr(admission, "rate_limiter", limiter)
+    monkeypatch.setattr(admission, "analysis_gate", ConcurrencyGate(limit=0))
 
     for _ in range(5):
         assert client.post("/api/analyze", json={"source": str(TINY_PYTHON)}).status_code == 503
 
     # Room again: the full quota is intact, none of it spent on the refusals.
-    monkeypatch.setattr(routes, "analysis_gate", ConcurrencyGate(limit=4))
+    monkeypatch.setattr(admission, "analysis_gate", ConcurrencyGate(limit=4))
     assert client.post("/api/analyze", json={"source": str(TINY_PYTHON)}).status_code == 202
 
 
@@ -193,8 +193,8 @@ def test_a_rate_limited_request_does_not_hold_a_slot(
     when the quota refuses — otherwise every 429 permanently shrinks the pool
     and the service ends up "busy" with nothing running."""
     gate = ConcurrencyGate(limit=2)
-    monkeypatch.setattr(routes, "analysis_gate", gate)
-    monkeypatch.setattr(routes, "rate_limiter", RateLimiter(limit=0, window_seconds=600))
+    monkeypatch.setattr(admission, "analysis_gate", gate)
+    monkeypatch.setattr(admission, "rate_limiter", RateLimiter(limit=0, window_seconds=600))
 
     assert client.post("/api/analyze", json={"source": str(TINY_PYTHON)}).status_code == 429
     assert gate.active == 0

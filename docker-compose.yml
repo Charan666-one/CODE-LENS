@@ -8,6 +8,25 @@
 # `backend:8000` on the internal network — so there is one public port, no
 # CORS grant to maintain, and no second thing to firewall. Uncomment the
 # backend `ports` block only when you want to poke the API directly.
+#
+# ## The hardening, and what each line is for
+#
+# This service clones and parses code chosen by strangers. It does not execute
+# that code (see backend/app/ingestion — the only subprocesses are `git clone`
+# and `git log`, both with fixed argv), but "we believe it cannot execute" is
+# a claim, and the container is where that claim is given teeth:
+#
+#   read_only          the image's filesystem cannot be modified at runtime
+#   tmpfs / volumes    the only writable paths, named explicitly
+#   cap_drop: ALL      no capabilities at all; neither service needs one
+#   no-new-privileges  setuid binaries cannot escalate
+#   mem_limit          an OOM kills one container, not the host
+#   pids_limit         a fork bomb hits a wall
+#   cpus               a runaway parse cannot starve the machine
+#
+# No Docker socket is mounted anywhere. Mounting it would hand any code
+# execution inside the backend full control of the host, and nothing here
+# needs it.
 
 services:
   backend:
@@ -25,10 +44,14 @@ services:
       # Ceilings for a small public instance. Raise them for a private one;
       # see backend/app/core/limits.py for what each one defends against.
       RATE_LIMIT_ANALYSES: 5
+      RATE_LIMIT_NARRATIONS: 20
       RATE_LIMIT_WINDOW_SECONDS: 300
       MAX_CONCURRENT_ANALYSES: 2
       MAX_CLONE_CACHE_MB: 4000
       MAX_REPO_SIZE_MB: 500
+      MAX_FILE_SIZE_MB: 4
+      MAX_FILES: 50000
+      ANALYSIS_TIMEOUT_SECONDS: 900
       # Optional. The graph, every query and every number in LEDGER.md are
       # deterministic and need no key; this only enables narration.
       GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -39,6 +62,21 @@ services:
       # Clone cache. Losing it is only slow, never wrong — which is why it is
       # a separate volume that can be dropped without touching the graphs.
       - codelens-clones:/var/cache/codelens
+    read_only: true
+    tmpfs:
+      # git writes here, and the parser's multiprocessing pool needs a real
+      # /tmp. `exec` is NOT granted: nothing legitimate runs a binary out of
+      # the scratch directory, and refusing it removes the most convenient
+      # place for anything else to try.
+      - /tmp:rw,noexec,nosuid,nodev,size=256m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    memswap_limit: 2g       # equal to mem_limit: no swap, so the OOM is prompt
+    cpus: "2.0"
+    pids_limit: 256
     # ports:
     #   - "8000:8000"
     restart: unless-stopped
@@ -55,6 +93,17 @@ services:
       CODELENS_API_URL: http://backend:8000
     ports:
       - "3000:3000"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: "1.0"
+    pids_limit: 128
     depends_on:
       backend:
         condition: service_healthy

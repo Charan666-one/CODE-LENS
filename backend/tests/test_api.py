@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+import app.api.admission as admission
 import app.api.routes as routes
 from app.core import jobs
 from app.core.graph_cache import cache as graph_cache
@@ -35,7 +36,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     # client address — without this the sixth test to analyse anything would
     # be rate-limited by the fifth. The limits themselves are exercised
     # deliberately in test_limits.py.
-    routes.rate_limiter.reset()
+    admission.reset()
     with TestClient(app) as test_client:
         yield test_client
     store.close()

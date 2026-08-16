@@ -106,9 +106,12 @@ Needs Python 3.13, Node 22, and `git`.
 ```
 
 See [RUNBOOK.md](RUNBOOK.md) for first-time setup and every verification
-command, and [DEPLOYING.md](DEPLOYING.md) before pointing it at the internet —
-this service clones arbitrary repositories on request, which is both the
-product and the entire attack surface.
+command, and [DEPLOYING.md](DEPLOYING.md) before pointing it at the internet.
+
+**Read [SECURITY.md](SECURITY.md) first if you are considering a public
+instance.** It is a full threat model and audit, and its verdict today is
+**not ready for public beta** — not because of an unfixed vulnerability, but
+because abuse response, a spend ceiling and backups do not exist yet.
 
 ### No API key required
 

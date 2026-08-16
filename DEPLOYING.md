@@ -42,7 +42,7 @@ product, and it is also the entire attack surface. Four ceilings exist for it
 | `RATE_LIMIT_ANALYSES` / `_WINDOW_SECONDS` | `5` / `300` | one client's loop is the whole machine |
 | `MAX_CONCURRENT_ANALYSES` | `2` | ten simultaneous monorepos, no health check answered |
 | `MAX_CLONE_CACHE_MB` | `4000` | a full disk, which takes SQLite down with it |
-| `MAX_REPO_SIZE_MB` | `500` | the clone is the denial of service |
+| `MAX_REPO_SIZE_MB` | `500` | the clone is the denial of service — now enforced *during* the clone, not after it |
 
 Three things to know about them before you rely on them:
 
@@ -58,6 +58,10 @@ Three things to know about them before you rely on them:
    setting it on a public instance hands the filesystem to whoever asks.
 
 There is no authentication. A public instance is a public instance.
+
+**Before a public beta, read [SECURITY.md](SECURITY.md).** It audits this
+deployment against a hostile user and lists five operational blockers that
+none of the limits above address.
 
 ---
 
