@@ -1,6 +1,17 @@
-# The Accuracy Ledger — first entry
+# The Accuracy Ledger
 
-**Date:** 2026-08-14 · **Method:** offline backtest against git history
+Entries are appended, never edited. A number that turned out to be wrong stays
+on the page with the correction under it, because the record of *how the
+measurement was wrong* is worth more than the measurement.
+
+- [Entry #1 — the graph loses to guessing](#entry-1--2026-08-14) (2026-08-14)
+- [Entry #2 — the gap was in the benchmark](#entry-2--2026-08-16) (2026-08-16)
+
+---
+
+# Entry #1 — 2026-08-14
+
+**Method:** offline backtest against git history
 **Reproduce:** `cd backend && .venv/bin/python scripts/backtest.py <repo-url>`
 
 CodeLens's claim is "what breaks if I change this?" This is the first
@@ -130,3 +141,138 @@ The order of work this implies:
 2. **Then rerun this, on more repos, including applications.**
 3. **Publish the number when it beats the baseline** — and publish it when it
    does not, because a ledger that only reports wins is marketing.
+
+---
+
+# Entry #2 — 2026-08-16
+
+**Method:** unchanged — offline backtest against git history, same four
+repositories, same `--k 10`.
+**Reproduce:** `cd backend && .venv/bin/python scripts/backtest.py https://github.com/psf/requests https://github.com/pallets/flask https://github.com/tiangolo/fastapi https://github.com/expressjs/express --k 10`
+
+Entry #1 concluded that **coverage was the whole gap** and that closing it was
+the highest-value work available. A slice of that work shipped. Then it was
+measured, and the conclusion did not survive.
+
+---
+
+## What was actually wrong
+
+**Entry #1's own footnote had it, and I did not read my own footnote.**
+"Known problem #2" says: seeding on a test file asks "what breaks if I change
+this test?", whose true answer is *nothing* — the commit's other files were
+its **dependencies**, not its dependents.
+
+That is not a footnote. On these repositories it is the result.
+
+A diagnostic over the silent examples:
+
+| repo | silent examples | of which are test files |
+|---|---|---|
+| expressjs/express | 85 | **84 (99%)** |
+| pallets/flask | 67 | **66 (99%)** |
+
+The benchmark asks a **symmetric** question — "the developer changed X; what
+else did they touch?" — and it was answered with a **one-directional** walk.
+For a test file the graph said nothing because nothing depends on a test, and
+was scored zero for being right. The reported 39% silence was very close to
+entirely this artifact.
+
+**The fix is to the measurement, not the parser.** `_rank_related` now ranks
+dependents first (still the product's claim) and then falls back to
+dependencies to fill the top 10.
+
+---
+
+## The two runs, kept separate on purpose
+
+### Run A — the correctness slice, graded the old way
+
+Per-directory `tsconfig`/`jsconfig` path aliases, barrel re-exports
+(`export * from './x'`), bare-specifier isolation, and
+`EXTERNAL_DEPENDENCY` + `DEPENDS_ON` nodes from `package.json` /
+`requirements.txt` / `pyproject.toml`.
+
+| | entry #1 | after the slice |
+|---|---|---|
+| precision@10 | 0.174 | **0.161** |
+| silence | 39% | **39%** |
+
+**It did not help. It scored slightly worse.** The parse genuinely improved —
+on this repository resolved `IMPORTS` went 191 → 260, with 13 external
+packages and 46 `DEPENDS_ON` edges that did not exist — but *none of that
+touched the thing the score was actually measuring*, because the thing being
+measured was the direction of the question.
+
+### Run B — same parser, benchmark asking its question in both directions
+
+| | blast radius | popularity baseline |
+|---|---|---|
+| precision@10 | **0.230** | **0.230** |
+| hit rate@10 | 0.707 | 0.805 |
+| recall@10 | 0.372 | — |
+| MRR | 0.370 | — |
+
+570 examples. **Silence fell from 39% to 2%** (9 of 570). Lift is **1.00×** —
+a dead heat with guessing the busiest files.
+
+### Per repository
+
+| repo | parsed | examples | silent | precision@10 | baseline | verdict |
+|---|---|---|---|---|---|---|
+| psf/requests | 37 | 137 | 2% | **0.364** | 0.226 | wins, 1.6× |
+| pallets/flask | 83 | 237 | 0% | 0.227 | 0.275 | loses, 0.82× |
+| tiangolo/fastapi | 1,140 | 56 | 9% | 0.062 | 0.097 | loses, 0.65× |
+| expressjs/express | 141 | 140 | **0%** | 0.172 | 0.213 | loses, 0.81× |
+
+Express was 66% silent in entry #1 and is now 0%. Flask parsed ~30 files then
+and 83 now.
+
+---
+
+## How much of Run B is real
+
+Some and not all, and the honest split is not available from these two runs.
+
+Grading both directions is a **strictly easier task** than grading blast
+radius, so a large part of the jump from 0.161 to 0.230 is the task getting
+easier rather than the graph getting better. This entry therefore does **not**
+claim blast radius improved. What it claims is narrower and firmer:
+
+- The 39% silence figure in entry #1 **measured the benchmark, not the graph**.
+- Entry #1's headline — the graph loses at 0.66× — was **directionally right
+  and numerically overstated**. At 1.00× it is a tie, not a loss.
+- A tie is still not a product claim.
+
+The example sets also differ slightly between the runs (534 → 570), because a
+better parse changes which files are tracked and therefore which commits
+qualify. The baseline moved too (0.264 → 0.230) for the same reason, which is
+exactly why the baseline is recomputed on the same examples every time and
+never carried over from a previous entry.
+
+---
+
+## What this changes
+
+**Still no accuracy badge in the UI.** 1.00× advertises nothing.
+
+**Retire "coverage is the whole gap."** It was inferred from a number that was
+measuring something else. The remaining silence is 2%; there is no coverage
+gap left to close on these repositories.
+
+The order of work this implies:
+
+1. **Ranking, not coverage.** The graph names ~8 of 10 files and gets ~0.23 of
+   them right. Distance is currently most of the ranking signal, and the
+   obvious unexploited signals — co-change weight, churn, symbol-level rather
+   than file-level reachability — are already computed and unused here.
+2. **Repositories that are not libraries.** Four repos, three Python, all
+   libraries, remains the same unaddressed criticism as entry #1. An
+   application or monorepo is where the popularity baseline should get weak,
+   and it has never been tested there.
+3. **Grade the two directions separately.** Reporting one blended number
+   reintroduces exactly the confusion this entry had to untangle.
+
+*The lesson to carry forward: entry #1 named this failure mode explicitly, in
+writing, and the next month of work still went the other way. Listing a
+known problem is not the same as pricing it.*

@@ -32,6 +32,9 @@ JobStatus = Literal["pending", "running", "done", "error"]
 @dataclass
 class Job:
     id: str
+    #: What this job is analysing. Two requests for the same thing are the
+    #: same job — see `find_active`.
+    key: str | None = None
     status: JobStatus = "pending"
     stages: list[dict[str, Any]] = field(default_factory=list)
     result: dict[str, Any] | None = None
@@ -46,11 +49,36 @@ class JobRegistry:
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
 
-    def create(self) -> Job:
-        job = Job(id=uuid.uuid4().hex)
+    def create(self, key: str | None = None) -> Job:
+        job = Job(id=uuid.uuid4().hex, key=key)
         with self._lock:
             self._jobs[job.id] = job
         return job
+
+    def find_active(self, key: str) -> Job | None:
+        """A pending or running job for the same source, if one exists.
+
+        Double-clicking "Understand" used to start a second pipeline for the
+        same repository, and both would then fight over the same clone
+        directory — one `rmtree`-ing the tree the other was parsing. The
+        observed result was a 172KB half-clone and a job wedged on "running"
+        forever. Returning the job already in flight is both the correct
+        answer to the question and the fix for the race.
+        """
+        with self._lock:
+            for job in self._jobs.values():
+                if job.key == key and job.status in ("pending", "running"):
+                    return job
+        return None
+
+    def reset(self) -> None:
+        """Forget every job. A process has one registry for its lifetime, so
+        this exists for tests: each gets a fresh store, and a job left
+        running from a previous test would otherwise be handed back by
+        `find_active` and then fail against a database that has been closed.
+        """
+        with self._lock:
+            self._jobs.clear()
 
     def get(self, job_id: str) -> Job | None:
         with self._lock:

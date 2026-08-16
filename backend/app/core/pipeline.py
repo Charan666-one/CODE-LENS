@@ -19,6 +19,7 @@ Two properties are load-bearing:
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -56,6 +57,28 @@ class PipelineResult:
     stages: list[tuple[Stage, float, bool]] = field(default_factory=list)
 
 
+#: One pipeline at a time per source.
+#:
+#: A repository clones to a path derived from its name, so two runs of the
+#: same repo share a working tree — and the first thing a clone does is
+#: `rmtree` it. Job dedupe (api/routes.py) stops the common case of asking
+#: twice, but nothing stopped two *different* callers, and the failure is
+#: ugly: one run deletes the tree another is parsing, leaving a half-clone
+#: and a job wedged on "running".
+#:
+#: Serialising by source is the whole fix, and it costs nothing real: the
+#: second run finds the content hash unchanged and returns from the skip
+#: check immediately. Different repositories are untouched and still run in
+#: parallel.
+_SOURCE_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(source: str) -> threading.Lock:
+    with _LOCKS_GUARD:
+        return _SOURCE_LOCKS.setdefault(source, threading.Lock())
+
+
 def run_pipeline(
     source: str | Path,
     store: GraphStore,
@@ -65,6 +88,20 @@ def run_pipeline(
     on_progress: ProgressCallback | None = None,
 ) -> PipelineResult:
     """Run source -> snapshot -> facts -> stored graph, skipping paid-for work."""
+    with _lock_for(str(source)):
+        return _run_pipeline_locked(
+            source, store, workdir=workdir, max_size_mb=max_size_mb, on_progress=on_progress
+        )
+
+
+def _run_pipeline_locked(
+    source: str | Path,
+    store: GraphStore,
+    *,
+    workdir: Path | None = None,
+    max_size_mb: int | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> PipelineResult:
     stages: list[tuple[Stage, float, bool]] = []
 
     def report(stage: Stage, seconds: float, skipped: bool) -> None:

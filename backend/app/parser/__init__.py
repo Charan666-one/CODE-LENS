@@ -31,6 +31,7 @@ from app.graph.schema import (
     NodeKind,
 )
 from app.ingestion import IngestedRepo, snapshot_directory
+from app.parser.externals import external_dependencies, read_manifests
 from app.parser.facts import FileFacts
 from app.parser.js_emitter import JsEmitter
 from app.parser.python_emitter import PythonEmitter, module_qname_for
@@ -57,7 +58,9 @@ __all__ = [
 #:
 #:   2  type-only imports marked; `from . import X` no longer depends on the
 #:      package root; endpoints, TESTS, CO_CHANGES, AUTHORED_BY emitted
-PARSER_VERSION = "2"
+#:   3  per-directory tsconfig aliases; barrel re-exports recorded;
+#:      EXTERNAL_DEPENDENCY + DEPENDS_ON emitted
+PARSER_VERSION = "3"
 
 _PYTHON_EXTENSIONS = frozenset({"py", "pyi"})
 _JS_EXTENSIONS = frozenset({"js", "jsx", "mjs", "cjs"})
@@ -85,7 +88,7 @@ def parse_repository(root: Path | str, *, max_size_mb: int | None = None) -> Kno
 _PARALLEL_THRESHOLD = 400
 
 
-def _build_emitters(aliases: dict[str, str]) -> dict[str, PythonEmitter | JsEmitter]:
+def _build_emitters(aliases: dict[str, dict[str, str]]) -> dict[str, PythonEmitter | JsEmitter]:
     """Per-language emitters. Rebuilt inside each worker process, because
     tree-sitter Language handles cannot cross a process boundary."""
     return {
@@ -100,7 +103,7 @@ _WORKER_EMITTERS: dict[str, PythonEmitter | JsEmitter] = {}
 _WORKER_ROOT: Path | None = None
 
 
-def _worker_init(root: Path, aliases: dict[str, str]) -> None:
+def _worker_init(root: Path, aliases: dict[str, dict[str, str]]) -> None:
     global _WORKER_ROOT
     _WORKER_ROOT = root
     _WORKER_EMITTERS.update(_build_emitters(aliases))
@@ -171,6 +174,17 @@ def _assemble(ingested: IngestedRepo, facts: list[FileFacts]) -> KnowledgeGraph:
     endpoint_nodes, endpoint_edges = _endpoints(facts)
     nodes.extend(endpoint_nodes)
     edges.extend(endpoint_edges)
+
+    # Layer B. Every bare import that resolved to nothing used to be silence;
+    # a declared package now becomes a node with real edges into it. The set
+    # of module names that DID resolve is passed in so a first-party
+    # directory sharing a dependency's name is never mistaken for it.
+    resolved_targets = {f.module_qname for f in facts}
+    external_nodes, external_edges = external_dependencies(
+        facts, read_manifests(ingested.root), resolved_targets
+    )
+    nodes.extend(external_nodes)
+    edges.extend(external_edges)
     snapshot = ingested.snapshot.model_copy(update={"parser_version": PARSER_VERSION})
     return KnowledgeGraph(snapshot=snapshot, nodes=nodes, edges=edges)
 
@@ -239,7 +253,7 @@ def _endpoints(facts: list[FileFacts]) -> tuple[list[Node], list[Edge]]:
 
 
 def _parse_in_parallel(
-    ingested: IngestedRepo, parseable: list[Any], aliases: dict[str, str]
+    ingested: IngestedRepo, parseable: list[Any], aliases: dict[str, dict[str, str]]
 ) -> list[FileFacts] | None:
     """Parse across processes. Returns None if a pool can't be used, so the
     caller falls back to the sequential path rather than failing."""
@@ -260,43 +274,98 @@ def _parse_in_parallel(
     return facts
 
 
-def _read_path_aliases(root: Path) -> dict[str, str]:
-    """tsconfig/jsconfig `compilerOptions.paths` -> {alias_prefix: module_prefix}.
+#: Directories a config scan must never descend into.
+_SKIP_DIRS = frozenset({"node_modules", ".git", ".next", "dist", "build", "vendor", ".venv"})
 
-    Turns `@/components/*` -> `./src/components/*` into `{"@/": "src."}`, so the
-    emitter can resolve `@/components/Navbar` to the real file. tsconfig is
-    JSON-with-comments; comments and trailing commas are stripped before
-    parsing, and any failure falls back to the near-universal Next.js default
-    (`@/` -> `src.` when a src/ dir exists, else repo root). Best-effort by
-    design: a missing alias just means a missing edge, never a crash.
+#: How deep to look for tsconfigs. Deep enough for `packages/*/tsconfig.json`
+#: and `apps/web/tsconfig.json`; shallow enough not to walk a monorepo's
+#: entire tree looking for a file that is conventionally near the top.
+_CONFIG_SCAN_DEPTH = 4
+
+
+def _read_path_aliases(root: Path) -> dict[str, dict[str, str]]:
+    """Every tsconfig/jsconfig in the tree -> per-directory alias maps.
+
+    Returns `{config_dir: {alias_prefix: dotted_module_prefix}}`, keyed by the
+    repo-relative directory the config governs ("" for the root).
+
+    **Why per-directory.** This used to read only `<root>/tsconfig.json`, which
+    is wrong for every layout where the frontend is not the repository: a repo
+    with `frontend/tsconfig.json` had its `@/` mapping ignored entirely and
+    fell back to a guess. It resolved anyway *by luck*, through the unique
+    suffix index — and in a monorepo where two packages both define `@/`, luck
+    runs out and the alias resolves to the wrong package's file. A wrong edge
+    is the expensive mistake.
+
+    Targets are resolved relative to the config's own directory, so
+    `frontend/tsconfig.json` mapping `@/*` -> `./*` yields `frontend.`, which
+    is what `@/lib/store` actually means from inside `frontend/`.
+
+    tsconfig is JSON-with-comments; comments and trailing commas are stripped
+    before parsing. Best-effort by design: an unreadable config costs an alias,
+    never a crash.
     """
-    aliases: dict[str, str] = {}
-    for name in ("tsconfig.json", "jsconfig.json"):
-        config_path = root / name
-        if not config_path.is_file():
-            continue
-        try:
-            text = re.sub(r"//[^\n]*", "", config_path.read_text(errors="replace"))
-            text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
-            text = re.sub(r",(\s*[}\]])", r"\1", text)  # trailing commas
-            config = json.loads(text)
-            options = config.get("compilerOptions", {})
-            base = str(options.get("baseUrl", ".")).strip("./")
-            for pattern, targets in (options.get("paths") or {}).items():
-                if not targets:
-                    continue
-                prefix = pattern.replace("*", "")
-                target = str(targets[0]).replace("*", "").strip("./").replace("/", ".")
-                if base and base != ".":
-                    target = f"{base}.{target}" if target else base
-                aliases[prefix] = f"{target}." if target and not target.endswith(".") else target
-        except (OSError, ValueError):
-            continue
-        if aliases:
-            return aliases
+    found: dict[str, dict[str, str]] = {}
 
-    # No usable config: the Next.js convention.
-    return {"@/": "src." if (root / "src").is_dir() else ""}
+    for config_path in _find_configs(root):
+        directory = config_path.parent.relative_to(root).as_posix()
+        directory = "" if directory == "." else directory
+        aliases = _aliases_from(config_path, directory)
+        if aliases:
+            # A directory with both tsconfig and jsconfig: first wins, which
+            # matches how the toolchain resolves them.
+            found.setdefault(directory, {}).update(
+                {k: v for k, v in aliases.items() if k not in found.get(directory, {})}
+            )
+
+    if found:
+        return found
+
+    # No usable config anywhere: the Next.js convention, at the root.
+    return {"": {"@/": "src." if (root / "src").is_dir() else ""}}
+
+
+def _find_configs(root: Path) -> list[Path]:
+    """tsconfig/jsconfig files, nearest the root first."""
+    configs: list[Path] = []
+    for name in ("tsconfig.json", "jsconfig.json"):
+        for depth in range(_CONFIG_SCAN_DEPTH):
+            pattern = "/".join(["*"] * depth + [name]) if depth else name
+            for path in root.glob(pattern):
+                if any(part in _SKIP_DIRS for part in path.relative_to(root).parts):
+                    continue
+                if path.is_file():
+                    configs.append(path)
+    return configs
+
+
+def _aliases_from(config_path: Path, directory: str) -> dict[str, str]:
+    """One config's `paths`, as dotted module prefixes relative to the repo."""
+    try:
+        text = re.sub(r"//[^\n]*", "", config_path.read_text(errors="replace"))
+        text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+        text = re.sub(r",(\s*[}\]])", r"\1", text)  # trailing commas
+        config = json.loads(text)
+    except (OSError, ValueError):
+        return {}
+
+    options = config.get("compilerOptions", {})
+    base = str(options.get("baseUrl", ".")).strip("./")
+    aliases: dict[str, str] = {}
+    for pattern, targets in (options.get("paths") or {}).items():
+        if not targets:
+            continue
+        prefix = pattern.replace("*", "")
+        target = str(targets[0]).replace("*", "").strip("./").replace("/", ".")
+        if base and base != ".":
+            target = f"{base}.{target}" if target else base
+        # Prepend the config's own directory: an alias is relative to the
+        # tsconfig that declares it, not to the repository root.
+        if directory:
+            dotted = directory.replace("/", ".")
+            target = f"{dotted}.{target}" if target else dotted
+        aliases[prefix] = f"{target}." if target and not target.endswith(".") else target
+    return aliases
 
 
 def _structural_nodes(

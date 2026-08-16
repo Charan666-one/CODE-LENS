@@ -87,6 +87,38 @@ def test_silence_is_counted_as_an_example_not_dropped() -> None:
     assert report.answered_precision() == 0.0
 
 
+def test_a_test_file_seed_is_graded_in_the_direction_it_has() -> None:
+    """The artifact that made entry #1's headline finding wrong.
+
+    `test_auth.py` imports `auth.py`; nothing imports the test. Graded on
+    dependents alone the graph correctly says nothing and is scored zero —
+    and 99% of the "silent" examples in the first run were exactly this. The
+    benchmark's question is symmetric, so the ranking has to be too.
+    """
+    view = _view(["auth.py", "test_auth.py"], [("test_auth.py", "auth.py")])
+    report = backtest(view, [_commit("auth.py", "test_auth.py")] * 3, k=5)
+
+    seeded_on_test = [p for p in report.predictions if p.seed == "test_auth.py"]
+    assert seeded_on_test
+    assert all(p.predicted == ("auth.py",) for p in seeded_on_test)
+    assert all(p.hits_at_k == 1 for p in seeded_on_test)
+
+
+def test_dependents_still_outrank_dependencies() -> None:
+    """Both directions are ranked, but not equally: blast radius is the
+    product's claim, so a dependent is named before a dependency."""
+    view = _view(
+        ["seed.py", "dependent.py", "dependency.py"],
+        [("dependent.py", "seed.py"), ("seed.py", "dependency.py")],
+    )
+    report = backtest(view, [_commit("seed.py", "dependent.py")] * 3, k=5)
+
+    seeded = [p for p in report.predictions if p.seed == "seed.py"]
+    assert seeded
+    assert all(p.predicted[0] == "dependent.py" for p in seeded)
+    assert all("dependency.py" in p.predicted for p in seeded)
+
+
 def test_sweeping_commits_are_excluded() -> None:
     paths = [f"f{i}.py" for i in range(40)]
     view = _view(paths, [])

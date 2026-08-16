@@ -43,8 +43,10 @@ is reported as one.
 
 from __future__ import annotations
 
+import contextlib
 from collections import Counter
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.graph.schema import EdgeKind, NodeKind
 from app.graph.traversal import GraphView
@@ -182,37 +184,55 @@ class BacktestReport:
         return self._mean([float(n) for n in lengths])
 
 
-def _rank_by_blast_radius(view: GraphView, seed_file: str, limit: int) -> list[str]:
-    """Files the graph says are affected by a change to `seed_file`, best first.
+def _rank_related(view: GraphView, seed_file: str, limit: int) -> list[str]:
+    """Files the graph relates to `seed_file`, nearest first, **both ways**.
 
-    Function- and class-level dependents are lifted to their files, keeping
-    each file's best rank: the comparison is against a commit, and commits
-    touch files.
+    Dependents first — that is blast radius, the product's actual claim — then
+    dependencies.
+
+    **Why both.** Grading dependents alone was wrong, and the wrongness was
+    large. This benchmark asks "the developer changed X; what else did they
+    touch?", which is a symmetric question, and answered it with a
+    one-directional walk. For a *test file* the true set of dependents is
+    empty — nothing imports a test — so the graph correctly said nothing and
+    was scored zero for it. Measured on the silent cases: **99% were test
+    files** on both Express and Flask. The reported "39% silence" was
+    therefore almost entirely this artifact rather than missing coverage, and
+    a whole slice of resolution work was aimed at a gap that was not there.
+
+    Dependents remain first in the ranking because they remain the product's
+    claim; adding the reverse direction makes the *measurement* match the
+    question it asks.
     """
     from app.queries.base import QueryError
     from app.queries.blast_radius import blast_radius
+    from app.queries.dependencies import dependencies as dependencies_query
 
     node_id = f"{NodeKind.FILE.value}:{seed_file}"
     if not view.has_node(node_id):
         return []
-    try:
-        result = blast_radius(view, node_id=node_id)
-    except QueryError:
-        return []
 
     ordered: list[str] = []
     seen: set[str] = set()
-    for entry in result.ranked:
-        node = view.node(entry.node_id)
-        if node is None or not node.file_path:
-            continue
-        path = node.file_path
-        if path == seed_file or path in seen:
-            continue
-        seen.add(path)
-        ordered.append(path)
-        if len(ordered) >= limit:
-            break
+
+    def take(ranked: list[Any]) -> None:
+        for entry in ranked:
+            if len(ordered) >= limit:
+                return
+            node = view.node(entry.node_id)
+            if node is None or not node.file_path:
+                continue
+            path = node.file_path
+            if path == seed_file or path in seen:
+                continue
+            seen.add(path)
+            ordered.append(path)
+
+    with contextlib.suppress(QueryError):
+        take(blast_radius(view, node_id=node_id).ranked)
+    if len(ordered) < limit:
+        with contextlib.suppress(QueryError):
+            take(dependencies_query(view, node_id=node_id).ranked)
     return ordered
 
 
@@ -276,7 +296,7 @@ def backtest(
 
         for seed in touched:
             actual = frozenset(touched) - {seed}
-            predicted = tuple(_rank_by_blast_radius(view, seed, k))
+            predicted = tuple(_rank_related(view, seed, k))
             if not predicted:
                 # No prediction at all is not a wrong prediction, but it is
                 # not a right one either — it counts as an example with zero

@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.api.routes as routes
+from app.core import jobs
 from app.core.graph_cache import cache as graph_cache
 from app.graph.store import SQLiteGraphStore
 from app.main import app
@@ -26,6 +27,10 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     store = SQLiteGraphStore(tmp_path / "api.db")
     monkeypatch.setattr(routes, "_STORE", store)
     graph_cache.clear()  # snapshot ids restart per test; never serve a stale graph
+    # Each test gets its own store, so a job left in flight by a previous one
+    # must not be handed back by the analyze dedupe — it would run against a
+    # database this fixture has since closed.
+    jobs.registry.reset()
     with TestClient(app) as test_client:
         yield test_client
     store.close()

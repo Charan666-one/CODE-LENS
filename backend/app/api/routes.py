@@ -95,7 +95,14 @@ def analyze(request: AnalyzeRequest) -> AnalyzeAccepted:
         except IngestionError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    job = jobs.registry.create()
+    # Asking twice for the same repository is one question, not two. Without
+    # this, a double-click starts a second pipeline that races the first over
+    # the same clone directory.
+    already_running = jobs.registry.find_active(str(source))
+    if already_running is not None:
+        return AnalyzeAccepted(job_id=already_running.id, status=already_running.status)
+
+    job = jobs.registry.create(key=str(source))
 
     def work() -> None:
         def on_progress(stage: Stage, seconds: float, skipped: bool) -> None:
