@@ -98,6 +98,36 @@ const CONFIDENCE_WIDTH: Record<string, number> = {
 const edgeColor = (confidence: string, alpha: number): string =>
   `rgba(${CONFIDENCE_RGB[confidence] ?? CONFIDENCE_RGB.resolved},${alpha})`;
 
+/** The node that stands for the selection at *this* zoom level.
+ *
+ *  A selection does not have to be drawable. ⌘K searches symbols, and picking
+ *  a function while the canvas is showing files selects a node the graph has
+ *  never heard of. Every consumer then took its "nothing is selected here"
+ *  branch: the hierarchy dimmed all 37 files to near-black, the camera refused
+ *  to move, and the inspector described a node that was nowhere on screen.
+ *  A blank canvas is the worst possible answer to "show me this function".
+ *
+ *  So the selection falls back to the file that contains it — the same
+ *  substitution the ripple already makes for the same reason. Choosing a
+ *  file's neighbourhood over an empty screen is not a fudge: at L2 the file
+ *  *is* how that function is represented, and lighting it is the honest
+ *  drawing of "this is where the thing you asked about lives".
+ *
+ *  `null` only when even the owning file is absent — at L1 there are no files
+ *  at all — and callers treat that as no selection rather than dimming a
+ *  canvas nothing will ever light back up.
+ */
+function anchorFor(
+  graph: Graph,
+  selectedId: string | null,
+  filePath: string | null | undefined,
+): string | null {
+  if (!selectedId) return null;
+  if (graph.hasNode(selectedId)) return selectedId;
+  if (filePath && graph.hasNode(`file:${filePath}`)) return `file:${filePath}`;
+  return null;
+}
+
 const easeInOutCubic = (t: number): number =>
   t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 
@@ -111,6 +141,9 @@ export default function GraphCanvas() {
   const containerRef = useRef<HTMLDivElement>(null);
   const sigmaRef = useRef<Sigma | null>(null);
   const frameRef = useRef<number | null>(null);
+  //: The node the current ripple has already been framed on, so the camera
+  //: moves once per wave rather than once per expanding ring.
+  const framedRippleRef = useRef<string | null>(null);
   /// Flips once Sigma exists, so the diff effect below re-runs for a spec
   /// that arrived while the container was still being laid out.
   const [ready, setReady] = useState(false);
@@ -119,6 +152,10 @@ export default function GraphCanvas() {
   const phase = useGraphStore((s) => s.phase);
   const revealIndex = useGraphStore((s) => s.revealIndex);
   const selectedId = useGraphStore((s) => s.selectedId);
+  // Only for `anchorFor`: the owning file of a selection this level cannot
+  // draw. It arrives a moment after the selection does, which is why every
+  // effect that anchors also depends on it.
+  const selectedPath = useGraphStore((s) => s.explanation?.meta.identity.file_path);
   const select = useGraphStore((s) => s.select);
   const advanceReveal = useGraphStore((s) => s.advanceReveal);
   const skipReveal = useGraphStore((s) => s.skipReveal);
@@ -343,8 +380,9 @@ export default function GraphCanvas() {
     // installed — L1 rendered blank while L2 looked fine. Releasing a
     // selection now leaves the view exactly where it is; the level buttons
     // and a dive are what move the camera.
-    if (!selectedId || !sigma.getGraph().hasNode(selectedId)) return;
-    const position = sigma.getNodeDisplayData(selectedId);
+    const anchor = anchorFor(sigma.getGraph(), selectedId, selectedPath);
+    if (!anchor) return;
+    const position = sigma.getNodeDisplayData(anchor);
     if (!position) return;
     camera.animate(
       // Never zoom *out* to reach something: if the reader has already pushed
@@ -352,7 +390,7 @@ export default function GraphCanvas() {
       { x: position.x, y: position.y, ratio: Math.min(camera.ratio, 0.55) },
       { duration: 420 },
     );
-  }, [selectedId, phase]);
+  }, [selectedId, selectedPath, phase]);
 
   // The reveal, the ripple, and the relevance hierarchy are all reducers over
   // precomputed state — the renderer decides nothing, it only choreographs.
@@ -360,6 +398,7 @@ export default function GraphCanvas() {
     const sigma = sigmaRef.current;
     if (!sigma) return;
     const graph = sigma.getGraph();
+    const anchor = anchorFor(graph, selectedId, selectedPath);
 
     // Ripple: distance-per-node from the real blast-radius result, kept only
     // for nodes that exist at this zoom level (the wave lights what's on screen).
@@ -401,6 +440,34 @@ export default function GraphCanvas() {
     }
     const rippleActive = rippleFor !== null && (rippleSource !== null || distanceOf.size > 0);
 
+    // Frame the wave's origin — but only when nothing else has.
+    //
+    // `anchorFor` usually gets there first, but it waits on the explanation
+    // fetch, and the ripple knows its own origin immediately — `blast.meta`
+    // carries the focus file. Without this the first second of an impact on a
+    // function was the failure the whole feature exists to avoid: the canvas
+    // dimmed, the counters counted, and the file actually lighting up could be
+    // anywhere off screen. Framing the source is what makes the dimming read
+    // as "look here" rather than "something happened".
+    //
+    // Once per ripple, not once per ring: this effect re-runs on every tick of
+    // the wave, and re-animating the camera under an expanding ripple is
+    // motion sickness. `null` when the ripple ends, so the next one frames.
+    if (!rippleActive || rippleSource === null) {
+      framedRippleRef.current = null;
+    } else if (framedRippleRef.current !== rippleSource && rippleSource !== anchor) {
+      framedRippleRef.current = rippleSource;
+      const position = sigma.getNodeDisplayData(rippleSource);
+      const camera = sigma.getCamera();
+      if (position) {
+        camera.animate(
+          // Same rule as the selection camera: close in, never pull out.
+          { x: position.x, y: position.y, ratio: Math.min(camera.ratio, 0.55) },
+          { duration: 420 },
+        );
+      }
+    }
+
     // A query's answer, drawn on the graph. Node ids come from the graph, but
     // a cluster at L1 is a view-layer invention, so `explainId` is checked too
     // — otherwise an answer about files would light nothing at district level.
@@ -418,11 +485,11 @@ export default function GraphCanvas() {
     // readable neighbourhood — it shows the shape of what the change touches.
     const direct = new Set<string>();
     const second = new Set<string>();
-    if (!rippleActive && selectedId && graph.hasNode(selectedId)) {
-      for (const neighbour of graph.neighbors(selectedId)) direct.add(neighbour);
+    if (!rippleActive && anchor) {
+      for (const neighbour of graph.neighbors(anchor)) direct.add(neighbour);
       for (const neighbour of direct) {
         for (const outer of graph.neighbors(neighbour)) {
-          if (outer !== selectedId && !direct.has(outer)) second.add(outer);
+          if (outer !== anchor && !direct.has(outer)) second.add(outer);
         }
       }
     }
@@ -454,7 +521,7 @@ export default function GraphCanvas() {
         };
       }
 
-      if (selectedId) {
+      if (anchor) {
         // 100 / 60 / 20 / 5. On a dense graph a slightly dimmer neighbour is
         // invisible, so the falloff has to be steep enough to read instantly.
         // Emphasis is added, then capped. A flat multiplier cannot serve both
@@ -464,7 +531,7 @@ export default function GraphCanvas() {
         // the large one recognisable — selection is carried by colour and
         // label anyway, with size only reinforcing it.
         const base = data.size as number;
-        if (node === selectedId) {
+        if (node === anchor) {
           return {
             ...data,
             color: "#ffffff",
@@ -525,11 +592,11 @@ export default function GraphCanvas() {
         return { ...data, color: "rgba(125,211,252,0.9)", size: baseSize * 2.2 };
       }
 
-      if (selectedId) {
-        const touchesSelection = source === selectedId || target === selectedId;
+      if (anchor) {
+        const touchesSelection = source === anchor || target === anchor;
         const withinDirect =
-          (direct.has(source) || source === selectedId) &&
-          (direct.has(target) || target === selectedId);
+          (direct.has(source) || source === anchor) &&
+          (direct.has(target) || target === anchor);
         const touchesSecond = second.has(source) || second.has(target);
 
         // 100 / 60 / 20 / 5 — the hierarchy, in alpha.
@@ -550,7 +617,7 @@ export default function GraphCanvas() {
     });
 
     sigma.refresh();
-  }, [phase, revealIndex, selectedId, rippleFor, blast, rippleFront, spec, overlay]);
+  }, [phase, revealIndex, selectedId, selectedPath, rippleFor, blast, rippleFront, spec, overlay]);
 
   // Drive the ripple clock: the wave expands one distance ring at a time.
   useEffect(() => {
