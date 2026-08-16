@@ -725,6 +725,28 @@ button {
 }
 
 
+
+/* ── the impact readout ──────────────────────────────────────────────── */
+/* Orange is reserved for the blast radius and nothing else, so the caption
+   and the wave are unmistakably the same event. */
+
+.hud-impact {
+  color: var(--impact);
+  letter-spacing: 0.06em;
+}
+
+.impact-readout {
+  margin-top: var(--s3);
+  border-top: 1px solid var(--line);
+  padding-top: var(--s3);
+}
+
+.impact-stage {
+  font-size: var(--text-meta);
+  color: var(--impact);
+  margin-bottom: var(--s2);
+}
+
 /* ── the graph guide ─────────────────────────────────────────────────── */
 /* A short lesson, shown once, then on request. It teaches the one idea that
    makes the rest obvious: three levels are one world at three depths. */

@@ -1,5 +1,6 @@
 "use client";
 
+import { STAGE_COPY, impactCounts } from "@/lib/impact";
 import { useGraphStore } from "@/lib/store";
 
 /** The top bar and the one-line readout at the bottom. Nothing else.
@@ -24,11 +25,17 @@ export default function HUD() {
   const clearOverlay = useGraphStore((s) => s.clearOverlay);
   const setPalette = useGraphStore((s) => s.setPalette);
   const setGuide = useGraphStore((s) => s.setGuide);
+  const rippleFront = useGraphStore((s) => s.rippleFront);
+  const rippleEndpoints = useGraphStore((s) => s.rippleEndpoints);
 
   if (phase !== "exploring" && phase !== "revealing") return null;
 
   const selected = spec?.nodes.find((node) => node.id === selectedId) ?? null;
   const role = explanation?.meta.role;
+  // Recomputed every tick from the wavefront, so the caption always matches
+  // the picture. A total printed while the wave is still moving would be a
+  // line that disagrees with the thing it is describing.
+  const impact = impactCounts(blast, rippleFront, rippleEndpoints);
   const repoName = repoUrl?.replace(/^https?:\/\/github\.com\//, "") ?? "";
 
   return (
@@ -77,7 +84,15 @@ export default function HUD() {
       {/* The one-line readout. Says where you are, or what you are focused on
           — never both, and never more than a line. */}
       <footer className="hud-bottom">
-        {selected ? (
+        {rippleFor && blast ? (
+          <span>
+            <span className="hud-impact">IMPACT</span> {impact.files} files ·{" "}
+            {impact.modules} modules
+            {impact.endpoints > 0 && <> · {impact.endpoints} endpoints</>} ·{" "}
+            {impact.hops} of {impact.maxHops} hops
+            <span className="hud-hint"> — {STAGE_COPY[impact.stage]}</span>
+          </span>
+        ) : selected ? (
           <span>
             <span className="hud-focus">FOCUS</span> {selected.label}
             {role && (
@@ -86,7 +101,6 @@ export default function HUD() {
                 {role.direct_dependencies} dependencies · {role.direct_dependents} dependents
               </>
             )}
-            {rippleFor && blast && <> · {blast.meta.total_affected} affected</>}
           </span>
         ) : (
           <span>

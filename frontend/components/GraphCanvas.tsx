@@ -368,10 +368,38 @@ export default function GraphCanvas() {
       for (const entry of blast.ranked) {
         if (graph.hasNode(entry.node_id)) {
           distanceOf.set(entry.node_id, entry.reasons.distance);
+          continue;
+        }
+        // The affected node is not drawn at this level — asking about a
+        // function while looking at files is the common case, and it used to
+        // light nothing at all: real counters over a dead canvas, which is
+        // exactly the disagreement between caption and picture this feature
+        // exists to avoid. Fall back to the file that contains it, keeping
+        // the nearest distance when several of its symbols are hit.
+        const path = entry.reasons.file_path;
+        if (!path) continue;
+        const owner = `file:${path}`;
+        if (!graph.hasNode(owner)) continue;
+        const existing = distanceOf.get(owner);
+        if (existing === undefined || entry.reasons.distance < existing) {
+          distanceOf.set(owner, entry.reasons.distance);
         }
       }
     }
-    const rippleActive = rippleFor !== null && graph.hasNode(rippleFor);
+    // The node the wave radiates from, as drawn at *this* level. Asking about
+    // a function while looking at files is the common case, so the source
+    // falls back to the file that holds it — otherwise the whole ripple was
+    // skipped and the readout described a wave nobody could see.
+    let rippleSource: string | null = null;
+    if (rippleFor && graph.hasNode(rippleFor)) {
+      rippleSource = rippleFor;
+    } else if (rippleFor && blast) {
+      const focusPath = blast.meta.focus?.file_path;
+      if (focusPath && graph.hasNode(`file:${focusPath}`)) {
+        rippleSource = `file:${focusPath}`;
+      }
+    }
+    const rippleActive = rippleFor !== null && (rippleSource !== null || distanceOf.size > 0);
 
     // A query's answer, drawn on the graph. Node ids come from the graph, but
     // a cluster at L1 is a view-layer invention, so `explainId` is checked too
@@ -406,7 +434,7 @@ export default function GraphCanvas() {
       }
 
       if (rippleActive) {
-        if (node === rippleFor) {
+        if (node === rippleSource) {
           // The source of the change: the eye of the storm.
           return { ...data, color: "#f8fafc", size: (data.size as number) * 1.6, zIndex: 3 };
         }
@@ -480,9 +508,9 @@ export default function GraphCanvas() {
 
       if (rippleActive) {
         const sourceReached =
-          source === rippleFor || (distanceOf.get(source) ?? Infinity) <= rippleFront;
+          source === rippleSource || (distanceOf.get(source) ?? Infinity) <= rippleFront;
         const targetReached =
-          target === rippleFor || (distanceOf.get(target) ?? Infinity) <= rippleFront;
+          target === rippleSource || (distanceOf.get(target) ?? Infinity) <= rippleFront;
         if (!sourceReached || !targetReached) return { ...data, hidden: true };
         // The wave owns the colour here — impact is the message, not provenance.
         return { ...data, size: baseSize * 1.4, color: "rgba(251,146,60,0.5)" };

@@ -53,6 +53,7 @@ def blast_radius(view: GraphView, *, node_id: str, max_depth: int | None = None)
         # it reads the way the dependency actually flows.
         path = list(reversed(shortest_paths[dependent]))
         paths[dependent] = path
+        node = view.node(dependent)
         ranked.append(
             RankedNode(
                 node_id=dependent,
@@ -62,6 +63,14 @@ def blast_radius(view: GraphView, *, node_id: str, max_depth: int | None = None)
                     "distance": distance,
                     "fan_in": fan_in,
                     "path_confidence": _weakest_confidence(view, path).value,
+                    # Which file this lands in. A caller counting "how many
+                    # files does this change touch" cannot derive it from the
+                    # id: a function's id carries a dotted qualified name, not
+                    # a path, so without this the UI either counted classes
+                    # and functions as files or had to re-fetch every node.
+                    "name": node.name if node else dependent,
+                    "kind": node.kind.value if node else None,
+                    "file_path": node.file_path if node else None,
                 },
             )
         )
@@ -70,6 +79,7 @@ def blast_radius(view: GraphView, *, node_id: str, max_depth: int | None = None)
 
     affected = set(distances)
     affected.add(node_id)
+    focus = view.node(node_id)
     return ResultGraph(
         query="blast_radius",
         params={"node_id": node_id, "max_depth": max_depth},
@@ -78,7 +88,18 @@ def blast_radius(view: GraphView, *, node_id: str, max_depth: int | None = None)
         edges=_induced_edges(view, affected),
         ranked=ranked,
         paths=paths,
-        meta={"total_affected": len(distances)},
+        meta={
+            "total_affected": len(distances),
+            # Where the changed thing lives. A renderer showing files cannot
+            # draw a wave whose source is a function unless it can find the
+            # file that holds it — asking about a symbol while looking at the
+            # file level is the common case, not the exotic one.
+            "focus": {
+                "id": node_id,
+                "name": focus.name if focus else node_id,
+                "file_path": focus.file_path if focus else None,
+            },
+        },
     )
 
 

@@ -72,6 +72,11 @@ export interface RankedNode {
     distance: number;
     fan_in: number;
     path_confidence: "resolved" | "heuristic" | "dynamic_unknown";
+    /** Which file the affected node lives in. Needed to count files rather
+     *  than nodes — a function's id is a dotted qualified name, not a path. */
+    file_path: string | null;
+    name: string;
+    kind: string | null;
   };
 }
 
@@ -192,5 +197,10 @@ export interface BlastResult {
   node_ids: string[];
   ranked: RankedNode[];
   paths: Record<string, string[]>;
-  meta: { total_affected: number };
+  meta: {
+    total_affected: number;
+    /** Where the changed thing lives, so a level rendering files can draw a
+     *  wave whose source is a function. */
+    focus?: { id: string; name: string; file_path: string | null };
+  };
 }

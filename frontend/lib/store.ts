@@ -10,6 +10,7 @@ import {
 } from "./api";
 import type {
   BlastResult,
+  EndpointRef,
   Explanation,
   PipelineStage,
   QueryResult,
@@ -54,6 +55,10 @@ interface GraphState {
   rippleFor: string | null;
   rippleFront: number;
   maxRippleDistance: number;
+  /** The HTTP routes this change reaches. Fetched beside the blast radius so
+   *  the readout can say `POST /checkout` rather than a file count — the
+   *  difference between a number to interpret and a decision. */
+  rippleEndpoints: EndpointRef[];
 
   analyze: (source: string) => Promise<void>;
   setZoom: (zoom: number) => Promise<void>;
@@ -143,6 +148,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   rippleFor: null,
   rippleFront: 0,
   maxRippleDistance: 0,
+  rippleEndpoints: [],
 
   analyze: async (source: string) => {
     set({ phase: "understanding", error: null, stages: [], stagesShown: 0, spec: null });
@@ -232,7 +238,12 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   showRipple: async (nodeId: string) => {
     const { snapshotId } = get();
     if (snapshotId === null) return;
-    const blast = await fetchBlastRadius(snapshotId, nodeId);
+    // Endpoints are a second question about the same change; asking both at
+    // once means the wave never arrives at a readout that is still loading.
+    const [blast, endpoints] = await Promise.all([
+      fetchBlastRadius(snapshotId, nodeId),
+      runQuery(snapshotId, "endpoints", { node_id: nodeId }).catch(() => null),
+    ]);
     const maxDistance = Math.max(
       1,
       ...blast.ranked.map((entry) => entry.reasons.distance),
@@ -241,8 +252,13 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       blast,
       rippleFor: nodeId,
       selectedId: nodeId,
-      rippleFront: 0, // the wave starts at the source and expands outward
+      // Starts at 1, not 0. The direct dependents are the answer to
+      // "what breaks if I change this" and they should be on screen the
+      // instant it is asked; starting at 0 spent the first 320ms showing
+      // "0 files" under a question the graph had already answered.
+      rippleFront: 1,
       maxRippleDistance: maxDistance,
+      rippleEndpoints: (endpoints?.meta.endpoints as EndpointRef[] | undefined) ?? [],
     });
   },
 
@@ -252,7 +268,8 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     set({ rippleFront: rippleFront + 1 });
   },
 
-  clearRipple: () => set({ blast: null, rippleFor: null, rippleFront: 0 }),
+  clearRipple: () =>
+    set({ blast: null, rippleFor: null, rippleFront: 0, rippleEndpoints: [] }),
 
   explanation: null,
   explaining: null,

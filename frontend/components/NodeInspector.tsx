@@ -1,5 +1,6 @@
 "use client";
 
+import { STAGE_COPY, impactCounts } from "@/lib/impact";
 import { useGraphStore } from "@/lib/store";
 import type { CoChangePartner, EndpointRef, TestFile } from "@/lib/types";
 
@@ -35,6 +36,8 @@ export default function NodeInspector() {
   const clearRipple = useGraphStore((s) => s.clearRipple);
   const dive = useGraphStore((s) => s.dive);
   const zoom = useGraphStore((s) => s.zoom);
+  const rippleFront = useGraphStore((s) => s.rippleFront);
+  const rippleEndpoints = useGraphStore((s) => s.rippleEndpoints);
 
   if (phase !== "exploring" && phase !== "revealing") return null;
   if (!selectedId) return null;
@@ -44,6 +47,7 @@ export default function NodeInspector() {
   const role = explanation?.meta.role;
   const rippleActive = rippleFor !== null && blast !== null;
   const graphId = viewNode?.explain_id ?? selectedId;
+  const impact = impactCounts(blast, rippleFront, rippleEndpoints);
 
   return (
     <aside className="inspector">
@@ -81,11 +85,42 @@ export default function NodeInspector() {
           <p className="inspector-verdict">{role.verdict}</p>
 
           {rippleActive ? (
-            <div className="inspector-actions">
-              <button className="inspector-action" onClick={clearRipple}>
-                Clear impact
-              </button>
-            </div>
+            <>
+              {/* The counters climb with the wave. The endpoint list is the
+                  payoff: a file count is a number to interpret, a URL is a
+                  decision about whether to deploy. */}
+              <div className="impact-readout">
+                <p className="impact-stage">
+                  {impact.hops} of {impact.maxHops} hops — {STAGE_COPY[impact.stage]}
+                </p>
+                <dl className="inspector-stats">
+                  <Stat label="files" value={impact.files} />
+                  <Stat label="modules" value={impact.modules} />
+                </dl>
+                {impact.endpoints > 0 && (
+                  <section className="inspector-section">
+                    <h3>Endpoints affected</h3>
+                    <ul className="inspector-list">
+                      {rippleEndpoints.slice(0, 5).map((endpoint) => (
+                        <li key={endpoint.id}>
+                          <div className="inspector-static">
+                            <span className="inspector-name">
+                              <span className="inspector-method">{endpoint.method}</span>
+                              {endpoint.path}
+                            </span>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
+              </div>
+              <div className="inspector-actions">
+                <button className="inspector-action" onClick={clearRipple}>
+                  Clear impact
+                </button>
+              </div>
+            </>
           ) : (
             <div className="inspector-actions">
               {/* Double-click on the canvas does this too, but a gesture
