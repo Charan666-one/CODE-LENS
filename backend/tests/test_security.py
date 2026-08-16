@@ -24,6 +24,7 @@ import app.api.admission as admission
 import app.api.routes as routes
 import app.api.semantic_routes as semantic
 from app.core import jobs
+from app.core.config import settings
 from app.core.graph_cache import cache as graph_cache
 from app.core.limits import ConcurrencyGate, RateLimiter
 from app.graph.store import SQLiteGraphStore
@@ -42,6 +43,10 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     monkeypatch.setenv("CODELENS_ALLOW_LOCAL_ANALYSIS", "1")
     store = SQLiteGraphStore(tmp_path / "api.db")
     monkeypatch.setattr(routes, "_STORE", store)
+    # The lifespan opens a JobStore at SQLITE_PATH. Without this a test run
+    # writes job rows into the real data volume, and jobs persisted by one
+    # test are visible to the next through the registry's database fallback.
+    monkeypatch.setattr(settings, "SQLITE_PATH", tmp_path / "jobs.db")
     graph_cache.clear()
     jobs.registry.reset()
     admission.reset()
@@ -298,15 +303,25 @@ def test_a_parser_crash_leaves_a_usable_error_and_frees_the_slot(
 
     accepted = client.post("/api/analyze", json={"source": str(TINY_PYTHON)})
     job_id = accepted.json()["job_id"]
+
+    # Two separate waits, because they are two separate events. The worker
+    # sets the job's status and *then* releases the slot in its `finally`, so
+    # there is a real window where the status is already `error` and the slot
+    # has not come back yet. Asserting the slot the instant the status flips
+    # made this test fail about half the time — a flake caused by the test
+    # assuming an atomicity the code never claimed.
     deadline = time.monotonic() + 10
-    body = {}
+    body: dict = {}
     while time.monotonic() < deadline:
         body = client.get(f"/api/analyze/{job_id}").json()
         if body["status"] == "error":
             break
-        time.sleep(0.1)
-
+        time.sleep(0.05)
     assert body["status"] == "error"
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and gate.active != 0:
+        time.sleep(0.05)
     assert gate.active == 0
 
 

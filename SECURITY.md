@@ -3,6 +3,11 @@
 **Date:** 2026-08-16 · **Scope:** security, abuse and durability audit ahead of a public beta.
 **Verdict:** **NOT READY FOR PUBLIC BETA.** Blockers in §10.
 
+> **Superseded in part.** All five §10 blockers were subsequently closed and
+> tested — see [DEPLOYMENT_READINESS.md](DEPLOYMENT_READINESS.md), which
+> raises the verdict to **READY FOR STAGING**. The threat model and findings
+> below stand as written.
+
 CodeLens accepts a repository URL from anyone, clones it, and parses untrusted
 source. This is an audit of what a hostile user can do with that, what was
 fixed, and what is still true.

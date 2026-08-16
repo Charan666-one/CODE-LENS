@@ -24,6 +24,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.api import admission
+from app.core.budget import budget
+from app.core.config import settings
 from app.core.graph_cache import cache
 from app.graph.schema import KnowledgeGraph
 from app.ingestion import IngestionError, ingest
@@ -60,7 +62,32 @@ def _remember_index(snapshot_id: int, index: ConceptIndex) -> None:
 
 
 def get_llm() -> LLMClient:
-    """The narration model. Overridden in tests; 503s cleanly without a key."""
+    """The narration model. Overridden in tests; 503s cleanly when unavailable.
+
+    Three ways this legitimately says no, and all three are a 503 with a
+    readable reason rather than an error:
+
+    * narration is switched off (the default),
+    * no provider is configured,
+    * the process has spent its call budget.
+
+    A 503 here never degrades CodeLens itself. The graph, every query and
+    every number in the Ledger are deterministic; only the prose is gated.
+    """
+    if not settings.NARRATION_ENABLED:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Narration is disabled on this instance. Every graph, query "
+                "and metric is available without it."
+            ),
+        )
+    if not budget.allow():
+        raise HTTPException(
+            status_code=503,
+            detail="Narration budget for this instance has been exhausted.",
+            headers={"Retry-After": "3600"},
+        )
     try:
         return build_llm()
     except LLMError as exc:

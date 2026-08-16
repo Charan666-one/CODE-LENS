@@ -41,6 +41,20 @@ services:
       # CORS does not apply. Leaving the browser origin here anyway costs
       # nothing and keeps direct-from-browser debugging working.
       CORS_ORIGINS: http://localhost:3000
+      # The only thing that can reach the backend is the frontend on the
+      # internal compose network, so its X-Forwarded-For is the real client.
+      # Without this every browser would share the frontend's address and the
+      # per-client rate limit would be one global bucket. Behind a public
+      # proxy, narrow this to that proxy's address.
+      TRUSTED_PROXY_IPS: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+      # Comma-separated IPs or CIDRs to refuse outright. The operational lever
+      # for "this one is abusing us": set it, restart, done.
+      BLOCKED_CLIENTS: ""
+      # Narration is OFF. Every graph, query, metric and Ledger number is
+      # deterministic and needs no model; only the prose costs money. Turning
+      # this on is a deliberate act — see DEPLOYING.md before you do.
+      NARRATION_ENABLED: "false"
+      NARRATION_MAX_CALLS: 500
       # Ceilings for a small public instance. Raise them for a private one;
       # see backend/app/core/limits.py for what each one defends against.
       RATE_LIMIT_ANALYSES: 5

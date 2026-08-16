@@ -27,8 +27,13 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from app.core.config import settings
+from app.core.job_store import JobStore
 
-JobStatus = Literal["pending", "running", "done", "error"]
+#: `interrupted` is what a restart leaves behind. It is distinct from `error`
+#: on purpose: nothing went wrong with the analysis, the process that was
+#: running it stopped existing, and "run it again" is the right advice rather
+#: than "something failed".
+JobStatus = Literal["pending", "running", "done", "error", "interrupted"]
 
 
 @dataclass
@@ -47,16 +52,44 @@ class Job:
 class JobRegistry:
     """Thread-safe in-memory store of one process's running jobs."""
 
-    def __init__(self, max_finished: int = 200) -> None:
+    def __init__(self, max_finished: int = 200, store: JobStore | None = None) -> None:
         self._jobs: dict[str, Job] = {}
         self._max_finished = max_finished
+        self._store = store
         self._lock = threading.Lock()
+
+    def attach(self, store: JobStore) -> None:
+        """Give the registry somewhere durable to write.
+
+        Called at application startup rather than in `__init__` so the module
+        stays importable — and fully testable — with no database at all.
+        """
+        self._store = store
+        store.sweep_interrupted()
+
+    def _persist(self, job: Job) -> None:
+        if self._store is None:
+            return
+        self._store.upsert(
+            {
+                "id": job.id,
+                "key": job.key,
+                "status": job.status,
+                "stages": job.stages,
+                "result": job.result,
+                "error": job.error,
+                "created_at": job.created_at,
+            }
+        )
 
     def create(self, key: str | None = None) -> Job:
         job = Job(id=uuid.uuid4().hex, key=key)
         with self._lock:
             self._jobs[job.id] = job
             self._evict_finished()
+        self._persist(job)
+        if self._store is not None:
+            self._store.prune(self._max_finished)
         return job
 
     def _evict_finished(self) -> None:
@@ -115,8 +148,30 @@ class JobRegistry:
             self._jobs.clear()
 
     def get(self, job_id: str) -> Job | None:
+        """The job, from memory or from the database.
+
+        The database fallback is what turns a restart from a 404 into an
+        answer: the row survives, says `interrupted`, and the client learns
+        something true instead of "no such job".
+        """
         with self._lock:
-            return self._jobs.get(job_id)
+            job = self._jobs.get(job_id)
+        if job is not None:
+            return job
+        if self._store is None:
+            return None
+        record = self._store.get(job_id)
+        if record is None:
+            return None
+        return Job(
+            id=record["id"],
+            key=record["key"],
+            status=record["status"],
+            stages=record["stages"],
+            result=record["result"],
+            error=record["error"],
+            created_at=record["created_at"],
+        )
 
     def update(self, job_id: str, **fields: Any) -> None:
         with self._lock:
@@ -125,12 +180,15 @@ class JobRegistry:
                 return
             for key, value in fields.items():
                 setattr(job, key, value)
+        self._persist(job)
 
     def append_stage(self, job_id: str, stage: dict[str, Any]) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None:
                 job.stages.append(stage)
+        if job is not None:
+            self._persist(job)
 
     def run_in_background(
         self,

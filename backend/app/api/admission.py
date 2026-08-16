@@ -22,13 +22,22 @@ async design exists to make free.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
 from fastapi import HTTPException, Request
 
+from app.core.clients import in_networks, parse_networks, resolve_client
 from app.core.config import settings
 from app.core.limits import ConcurrencyGate, RateLimiter
+
+logger = logging.getLogger(__name__)
+
+#: Parsed once. See core/clients.py for why a forwarded header is only
+#: believed when it arrives from a vouched-for peer.
+TRUSTED_PROXIES = parse_networks(settings.TRUSTED_PROXY_IPS)
+BLOCKED = parse_networks(settings.BLOCKED_CLIENTS)
 
 #: Process-wide counters. See core/limits.py for what each defends against.
 rate_limiter = RateLimiter(settings.RATE_LIMIT_ANALYSES, settings.RATE_LIMIT_WINDOW_SECONDS)
@@ -50,8 +59,11 @@ def reset() -> None:
 
 def charge_narration(request: Request) -> None:
     """Meter an endpoint that spends money but starts no expensive work."""
-    retry_after = llm_limiter.check(client_key(request))
+    enforce_blocklist(request)
+    identity = client_key(request)
+    retry_after = llm_limiter.check(identity)
     if retry_after is not None:
+        _log_refusal(request, "narration_rate_limit", identity)
         raise HTTPException(
             status_code=429,
             detail=(
@@ -68,16 +80,54 @@ def client_key(request: Request) -> str:
 
     Behind a proxy the socket address is the proxy, so every client would
     share one bucket and the first few analyses would lock out everyone.
-    `X-Forwarded-For`'s left-most entry is the original client where a proxy
-    sets it. It is also trivially spoofable by a direct caller, which is the
-    accepted trade: this is an abuse speed bump on a public instance, not an
-    authentication boundary, and saying so is better than implying a strength
-    it does not have.
+    `X-Forwarded-For` carries the original client — but only a proxy the
+    operator has vouched for is believed, because a header the caller writes
+    is a quota the caller mints. See core/clients.py.
     """
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    identity, _ = resolve_client(
+        request.client.host if request.client else None,
+        request.headers.get("x-forwarded-for"),
+        TRUSTED_PROXIES,
+    )
+    return identity
+
+
+def peer_address(request: Request) -> str:
+    """The socket address, whatever the headers say. Used for blocking, which
+    must never be defeatable by the thing being blocked."""
+    return (request.client.host if request.client else "unknown") or "unknown"
+
+
+def enforce_blocklist(request: Request) -> None:
+    """Refuse a client the operator has blocked.
+
+    Matched on the *peer* and on the resolved identity: the peer so a blocked
+    address cannot escape by forging a header, the identity so a client
+    behind a trusted proxy can be blocked at all.
+    """
+    if not BLOCKED:
+        return
+    peer = peer_address(request)
+    identity = client_key(request)
+    if in_networks(peer, BLOCKED) or in_networks(identity, BLOCKED):
+        logger.warning(
+            "request_blocked peer=%s identity=%s path=%s", peer, identity, request.url.path
+        )
+        raise HTTPException(status_code=403, detail="Blocked.")
+
+
+def _log_refusal(request: Request, reason: str, identity: str) -> None:
+    """One structured line per refusal, so abuse is visible without a
+    dashboard. Deliberately carries no request body and no repository
+    contents — only who, what and why."""
+    logger.warning(
+        "request_refused reason=%s identity=%s peer=%s path=%s method=%s",
+        reason,
+        identity,
+        peer_address(request),
+        request.url.path,
+        request.method,
+    )
 
 
 def acquire(request: Request) -> Callable[[], None]:
@@ -94,7 +144,11 @@ def acquire(request: Request) -> Callable[[], None]:
     settled first; how often this client may ask is settled second, and only
     for a request that would otherwise have proceeded.
     """
+    enforce_blocklist(request)
+    identity = client_key(request)
+
     if not analysis_gate.try_acquire():
+        _log_refusal(request, "capacity", identity)
         raise HTTPException(
             status_code=503,
             detail=(
@@ -104,9 +158,10 @@ def acquire(request: Request) -> Callable[[], None]:
             headers={"Retry-After": "30"},
         )
 
-    retry_after = rate_limiter.check(client_key(request))
+    retry_after = rate_limiter.check(identity)
     if retry_after is not None:
         analysis_gate.release()  # never hold a slot for work that will not run
+        _log_refusal(request, "rate_limit", identity)
         raise HTTPException(
             status_code=429,
             detail=(

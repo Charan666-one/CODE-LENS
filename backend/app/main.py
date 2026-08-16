@@ -1,15 +1,39 @@
 # backend/app/main.py
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.body_limit import BodyLimitMiddleware
 from app.api.routes import router as api_router
 from app.api.semantic_routes import router as semantic_router
+from app.core import jobs
 from app.core.config import settings
+from app.core.job_store import JobStore
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Give jobs somewhere durable to live, and clean up what a crash left.
+
+    Without this a restart dropped every in-flight analysis and the browser
+    polling for it received a 404 — "no such job" — which a client cannot
+    distinguish from a typo. Attaching also sweeps anything the previous
+    process left `running` to `interrupted`, because that is the only thing
+    that can be true: the thread doing the work died with the process.
+    """
+    store = JobStore(settings.SQLITE_PATH)
+    jobs.registry.attach(store)
+    try:
+        yield
+    finally:
+        store.close()
 
 
 def create_app() -> FastAPI:
     app = FastAPI(
+        lifespan=lifespan,
         title="CodeLens AI",
         description="Intelligent Codebase Understanding & Analysis System",
         version=settings.VERSION,

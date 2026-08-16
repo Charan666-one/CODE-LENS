@@ -59,6 +59,158 @@ Three things to know about them before you rely on them:
 
 There is no authentication. A public instance is a public instance.
 
+### Client identity — set this or the rate limit is one global bucket
+
+The limiter counts against an identity, and the only unforgeable one is the
+socket peer. A forwarded header is believed **exactly** when it arrives from a
+proxy you have vouched for:
+
+```
+TRUSTED_PROXY_IPS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16   # compose default
+```
+
+Get this wrong in either direction and something breaks quietly:
+
+- **Too narrow** (empty, behind a proxy): every browser shares the proxy's
+  address, so the whole internet is one bucket and the first five analyses
+  lock out everyone.
+- **Too wide** (`0.0.0.0/0` on a public port): any caller can write their own
+  `X-Forwarded-For` and mint a fresh quota per request. The limit becomes
+  decorative.
+
+Behind Cloudflare or nginx, narrow it to that proxy's addresses.
+
+### Blocking a client
+
+```
+BLOCKED_CLIENTS=203.0.113.7,198.51.100.0/24
+```
+
+Restart to apply. Matched against the peer *and* the resolved identity, so a
+blocked address cannot escape by forging a header. This is deliberately the
+smallest possible lever — a real ban system belongs in the proxy, and this
+exists so the answer to abuse is never "nothing until we build something".
+
+### Watching for abuse
+
+Every refusal is one structured line on the backend logger:
+
+```
+request_refused reason=rate_limit identity=203.0.113.7 peer=172.18.0.3 path=/api/analyze method=POST
+request_blocked peer=203.0.113.7 identity=203.0.113.7 path=/api/analyze
+untrusted_forwarded_header peer=203.0.113.7 header_present=true
+```
+
+No bodies, no repository contents, no secrets — only who, what and why.
+
+```bash
+docker compose logs backend | grep -c request_refused          # is anyone hitting limits
+docker compose logs backend | grep request_refused | awk '{print $3}' | sort | uniq -c | sort -rn
+```
+
+**What remains deployment configuration:** alerting on those counts, and an
+actual ban at the edge. Neither belongs in this application — a WAF and a log
+drain do both better — and neither is present here.
+
+---
+
+## Narration (LLM) — off by default
+
+`NARRATION_ENABLED` defaults to **false**, and the container sets it
+explicitly. Everything CodeLens claims is deterministic: the graph, blast
+radius, ranking, risk, cycles, health, evidence, and every number in
+`LEDGER.md`. Only the prose *about* those facts costs money.
+
+With it off, the narration endpoints return `503` with a readable reason and
+nothing else changes. The UI never calls them.
+
+### Enabling it safely
+
+1. Set a **hard spend cap at the provider** — Groq, OpenRouter and Anthropic
+   all offer one. This is the only durable ceiling; everything below is a
+   process-local approximation that a restart resets.
+2. Then:
+
+```yaml
+NARRATION_ENABLED: "true"
+NARRATION_MAX_CALLS: 500     # model calls for the life of the process
+RATE_LIMIT_NARRATIONS: 20    # per client per window
+GROQ_API_KEY: ${GROQ_API_KEY}
+```
+
+3. Watch `narration_budget_exhausted` in the logs. It fires once, when the
+   process budget is gone, and narration 503s until a restart.
+
+The key is read from the environment, is never sent to the frontend, and is
+never logged. Do not bake it into an image.
+
+---
+
+## Backup and restore
+
+### What is in the volumes
+
+| volume | contents | backed up |
+|---|---|---|
+| `codelens-data` | one SQLite file: snapshots, nodes, edges, annotations, the paid-for summary cache, and job state | **yes** |
+| `codelens-clones` | working trees of public repositories | **no** — every byte is re-fetchable from GitHub, and a stale tree restores worse than none |
+
+The database contains no credentials. Author identities are stored as digests
+(`backend/app/graph/ownership.py`), and raw source is never persisted — only
+the structure derived from it.
+
+### Backing up
+
+```bash
+ops/backup.sh                 # writes ./backups/codelens-<UTC timestamp>.db
+```
+
+Uses SQLite's own `.backup`, not `cp`: the database is being written while the
+command runs, and copying the file mid-transaction restores as "database disk
+image is malformed" at the worst possible moment. The result is verified with
+`PRAGMA integrity_check` on both sides before the script calls it a backup.
+Output is `chmod 600` in a `chmod 700` directory — a backup is a full copy of
+every analysed repository's structure.
+
+### Restoring
+
+```bash
+ops/restore.sh backups/codelens-<stamp>.db --verify-only   # throwaway container
+ops/restore.sh backups/codelens-<stamp>.db                 # into the live stack
+```
+
+**Run `--verify-only` after every schema change.** It restores into a clean
+disposable volume and asks a real CodeLens process to load a graph and run a
+query against it — a backup nobody has restored is a hypothesis. The live path
+stops the stack first, because restoring underneath an open SQLite handle
+produces corruption that looks like a CodeLens bug.
+
+### Scheduling it
+
+```
+0 3 * * *  cd /srv/codelens && ops/backup.sh /var/backups/codelens
+```
+
+**Not configured here.** Off-host copies (S3, B2, restic) need credentials
+this repository does not have. A backup that lives only on the machine it
+backs up is not a backup — that step is yours, and until it is done, item 3
+in `SECURITY.md` remains open.
+
+---
+
+## Load testing
+
+```bash
+docker compose up -d --wait
+python3 ops/loadtest.py --burst 8
+```
+
+Pushes slightly past the configured limits with real repositories and reports
+successes, 429/503 behaviour, admission latency, container memory and CPU,
+clone-cache growth, job-table size, and whether the service recovers. Standard
+library plus the `docker` CLI; nothing to install. Results from the last run
+are in `SECURITY.md`.
+
 **Before a public beta, read [SECURITY.md](SECURITY.md).** It audits this
 deployment against a hostile user and lists five operational blockers that
 none of the limits above address.

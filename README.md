@@ -108,10 +108,13 @@ Needs Python 3.13, Node 22, and `git`.
 See [RUNBOOK.md](RUNBOOK.md) for first-time setup and every verification
 command, and [DEPLOYING.md](DEPLOYING.md) before pointing it at the internet.
 
-**Read [SECURITY.md](SECURITY.md) first if you are considering a public
-instance.** It is a full threat model and audit, and its verdict today is
-**not ready for public beta** — not because of an unfixed vulnerability, but
-because abuse response, a spend ceiling and backups do not exist yet.
+**Read [SECURITY.md](SECURITY.md) and
+[DEPLOYMENT_READINESS.md](DEPLOYMENT_READINESS.md) before running a public
+instance.** The first is a full threat model and audit; the second closes the
+five operational gaps it left open and tests each against the running
+containers. Current verdict: **ready for staging** — behind a proxy, with
+narration off. Public beta needs one more thing: backups copied off the
+machine they back up.
 
 ### No API key required
 

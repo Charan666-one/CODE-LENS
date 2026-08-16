@@ -214,7 +214,10 @@ def analyze_status(job_id: str) -> JobStatusResponse:
     payload: dict[str, Any] = {"job_id": job.id, "status": job.status, "stages": job.stages}
     if job.status == "done" and job.result is not None:
         payload.update(job.result)
-    if job.status == "error":
+    if job.status in ("error", "interrupted"):
+        # `interrupted` carries its explanation too. Without this the status
+        # arrived with a null message and the client fell back to a generic
+        # string, losing the one useful thing the server knew.
         payload["error"] = job.error
     return JobStatusResponse(**payload)
 

@@ -45,6 +45,26 @@ class Settings(BaseSettings):
     #: them wedge the service permanently.
     ANALYSIS_TIMEOUT_SECONDS: int = 900
 
+    # ── Client identity, for rate limiting ────────────────────────────────
+    #: Peers whose `X-Forwarded-For` header may be believed, as IPs or CIDRs.
+    #: Empty means believe nobody, which is the safe default: a header is a
+    #: claim by whoever sent it, and trusting it unconditionally lets any
+    #: caller mint a fresh identity per request and defeat the rate limit
+    #: entirely. Only the socket peer is unforgeable, so the header is used
+    #: exactly when the peer is a proxy the operator has vouched for.
+    #:
+    #: Under docker compose the only thing that can reach the backend is the
+    #: frontend on the internal network, so the compose file sets this to the
+    #: private ranges. Behind a public proxy, set it to that proxy's address.
+    TRUSTED_PROXY_IPS: str = ""
+
+    #: Clients refused outright, as IPs or CIDRs. The operational lever for
+    #: "this one is abusing us" — no database, no admin UI, just a value the
+    #: operator can set and restart. Deliberately small: a real ban system is
+    #: the proxy's job, and this exists so the answer to abuse is never
+    #: "nothing until we build something".
+    BLOCKED_CLIENTS: str = ""
+
     # ── Serving ───────────────────────────────────────────────────────────
     #: Browser origins allowed to call this API. The default is the local
     #: frontend; a deployment must set its own, and setting `*` alongside
@@ -85,6 +105,19 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
 
     # ── Semantic layer (Stage 3) ──────────────────────────────────────────
+    #: **Narration is off unless switched on.** Everything CodeLens claims —
+    #: the graph, blast radius, ranking, risk, cycles, health, evidence and
+    #: every number in LEDGER.md — is deterministic and needs no model. Only
+    #: the prose *about* those facts costs money, and a key sitting in the
+    #: environment should not by itself expose a public endpoint that spends
+    #: it. Enabling requires saying so, in one variable, on purpose.
+    NARRATION_ENABLED: bool = False
+    #: Hard ceiling on model calls for the life of the process, across every
+    #: client. The per-client rate limit bounds requests; this bounds the
+    #: bill. Restarting resets it, which is the honest scope of an in-process
+    #: budget — a durable one needs the provider's own spend cap (DEPLOYING.md).
+    NARRATION_MAX_CALLS: int = 500
+
     # Unset until CP-3.2. Absence must never break the graph pipeline.
     ANTHROPIC_API_KEY: str | None = None
 

@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 import app.api.admission as admission
 import app.api.routes as routes
 from app.core import jobs
+from app.core.config import settings
 from app.core.graph_cache import cache as graph_cache
 from app.graph.store import SQLiteGraphStore
 from app.main import app
@@ -27,6 +28,10 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     monkeypatch.setenv("CODELENS_ALLOW_LOCAL_ANALYSIS", "1")
     store = SQLiteGraphStore(tmp_path / "api.db")
     monkeypatch.setattr(routes, "_STORE", store)
+    # The lifespan opens a JobStore at SQLITE_PATH. Without this a test run
+    # writes job rows into the real data volume, and jobs persisted by one
+    # test are visible to the next through the registry's database fallback.
+    monkeypatch.setattr(settings, "SQLITE_PATH", tmp_path / "jobs.db")
     graph_cache.clear()  # snapshot ids restart per test; never serve a stale graph
     # Each test gets its own store, so a job left in flight by a previous one
     # must not be handed back by the analyze dedupe — it would run against a
