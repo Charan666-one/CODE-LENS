@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 from app.core import jobs
 from app.core.config import settings
 from app.core.graph_cache import cache
-from app.core.pipeline import Stage, run_pipeline
+from app.core.pipeline import StageReport, run_pipeline
 from app.graph.store import SQLiteGraphStore
 from app.ingestion import IngestionError, looks_like_remote
 from app.ingestion.clone import normalize_repo_url
@@ -105,9 +105,15 @@ def analyze(request: AnalyzeRequest) -> AnalyzeAccepted:
     job = jobs.registry.create(key=str(source))
 
     def work() -> None:
-        def on_progress(stage: Stage, seconds: float, skipped: bool) -> None:
+        def on_progress(report: StageReport) -> None:
             jobs.registry.append_stage(
-                job.id, {"stage": stage.value, "seconds": round(seconds, 3), "skipped": skipped}
+                job.id,
+                {
+                    "stage": report.stage.value,
+                    "seconds": round(report.seconds, 3),
+                    "skipped": report.skipped,
+                    "detail": report.detail,
+                },
             )
 
         result = run_pipeline(

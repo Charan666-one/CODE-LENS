@@ -43,8 +43,26 @@ class Stage(str, Enum):
     GRAPH_BUILT = "graph_built"
 
 
-#: Called after every stage: (stage, seconds_taken, skipped)
-ProgressCallback = Callable[[Stage, float, bool], None]
+@dataclass(frozen=True)
+class StageReport:
+    """One completed stage: what it was, what it cost, what it found.
+
+    `detail` is the stage's own measurement in one short phrase — the files
+    the clone actually contained, the nodes the parse actually emitted. It
+    exists so the loading UI can say *what happened* rather than only that
+    something did, and it is a count taken from the result, never an estimate
+    of remaining work. A stage that measured nothing leaves it `None` rather
+    than inventing a plausible-looking number.
+    """
+
+    stage: Stage
+    seconds: float
+    skipped: bool
+    detail: str | None = None
+
+
+#: Called after every stage, with that stage's report.
+ProgressCallback = Callable[[StageReport], None]
 
 
 @dataclass
@@ -54,7 +72,7 @@ class PipelineResult:
     graph: KnowledgeGraph
     snapshot_id: int
     skipped: bool  # True when the hash key made the whole run a no-op
-    stages: list[tuple[Stage, float, bool]] = field(default_factory=list)
+    stages: list[StageReport] = field(default_factory=list)
 
 
 #: One pipeline at a time per source.
@@ -102,18 +120,26 @@ def _run_pipeline_locked(
     max_size_mb: int | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> PipelineResult:
-    stages: list[tuple[Stage, float, bool]] = []
+    stages: list[StageReport] = []
 
-    def report(stage: Stage, seconds: float, skipped: bool) -> None:
-        stages.append((stage, seconds, skipped))
+    def report(
+        stage: Stage, seconds: float, skipped: bool, detail: str | None = None
+    ) -> None:
+        entry = StageReport(stage, seconds, skipped, detail)
+        stages.append(entry)
         if on_progress is not None:
-            on_progress(stage, seconds, skipped)
+            on_progress(entry)
 
     # Stage 1 — cloned. Always runs: acquiring the source is what tells us the
     # commit sha, and the sha is what everything after keys on.
     started = time.monotonic()
     ingested: IngestedRepo = ingest(source, workdir=workdir, max_size_mb=max_size_mb)
-    report(Stage.CLONED, time.monotonic() - started, False)
+    report(
+        Stage.CLONED,
+        time.monotonic() - started,
+        False,
+        f"{ingested.snapshot.file_count:,} files · {ingested.snapshot.primary_language}",
+    )
 
     # The skip check — is this exact repository state already analysed? The
     # commit sha finds the candidate row, but the *content digest* decides:
@@ -134,9 +160,14 @@ def _run_pipeline_locked(
             _stored_digest(graph) == _inventory_digest(ingested)
             and graph.snapshot.parser_version == PARSER_VERSION
         ):
-            report(Stage.PARSED, 0.0, True)
+            # Skipped, but not unmeasured: the stored graph is the answer
+            # those stages would have produced, so it can report the same
+            # counts. Zero seconds and `skipped` are what say the work was
+            # not redone; blanking the detail as well would make a cache hit
+            # look like a failure to find anything.
+            report(Stage.PARSED, 0.0, True, f"{len(graph.nodes):,} nodes")
             report(Stage.METRICS, 0.0, True)
-            report(Stage.GRAPH_BUILT, 0.0, True)
+            report(Stage.GRAPH_BUILT, 0.0, True, f"{len(graph.edges):,} relationships")
             return PipelineResult(
                 graph=graph, snapshot_id=existing_id, skipped=True, stages=stages
             )
@@ -144,7 +175,12 @@ def _run_pipeline_locked(
     # Stage 2 — parsed.
     started = time.monotonic()
     graph = parse_ingested(ingested)
-    report(Stage.PARSED, time.monotonic() - started, False)
+    report(
+        Stage.PARSED,
+        time.monotonic() - started,
+        False,
+        f"{len(graph.nodes):,} nodes",
+    )
 
     # Stage 3 — metrics: the git-lite temporal pass (CP-1.5). Fact source is
     # git history, so it lives outside the parser (which only reads the AST).
@@ -162,12 +198,22 @@ def _run_pipeline_locked(
     # needs no history, and is here only because this is where derived edges
     # are added rather than for any dependency on git.
     graph.edges.extend(link_tests(graph.nodes, graph.edges))
-    report(Stage.METRICS, time.monotonic() - started, False)
+    report(
+        Stage.METRICS,
+        time.monotonic() - started,
+        False,
+        f"{len(commits):,} commits",
+    )
 
     # Stage 4 — graph_built (persisted; a graph that only lives in RAM isn't built).
     started = time.monotonic()
     snapshot_id = store.save_graph(graph)
-    report(Stage.GRAPH_BUILT, time.monotonic() - started, False)
+    report(
+        Stage.GRAPH_BUILT,
+        time.monotonic() - started,
+        False,
+        f"{len(graph.edges):,} relationships",
+    )
 
     return PipelineResult(graph=graph, snapshot_id=snapshot_id, skipped=False, stages=stages)
 

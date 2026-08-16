@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.core.pipeline import Stage, run_pipeline
+from app.core.pipeline import Stage, StageReport, run_pipeline
 from app.graph.schema import EdgeKind, KnowledgeGraph
 from app.graph.store import SQLiteGraphStore
 from app.graph.traversal import GraphView
@@ -108,8 +108,8 @@ def test_pipeline_builds_persists_and_skips_unchanged(tmp_path: Path) -> None:
     """The CP-1.4 gate, on CodeLens itself."""
     events: list[tuple[Stage, bool]] = []
 
-    def watch(stage: Stage, seconds: float, skipped: bool) -> None:
-        events.append((stage, skipped))
+    def watch(report: StageReport) -> None:
+        events.append((report.stage, report.skipped))
 
     with SQLiteGraphStore(tmp_path / "codelens.db") as store:
         first = run_pipeline(
@@ -164,9 +164,17 @@ def test_progress_events_are_the_real_stages(tmp_path: Path) -> None:
 
     seen: list[Stage] = []
     with SQLiteGraphStore(tmp_path / "g.db") as store:
-        result = run_pipeline(repo, store, on_progress=lambda s, t, k: seen.append(s))
+        result = run_pipeline(repo, store, on_progress=lambda r: seen.append(r.stage))
     assert seen == [Stage.CLONED, Stage.PARSED, Stage.METRICS, Stage.GRAPH_BUILT]
-    assert [s for s, _, _ in result.stages] == seen
+    assert [entry.stage for entry in result.stages] == seen
+
+    # Every detail is a count the stage actually took, so each one has to
+    # appear somewhere in the graph it describes. A stage that measured
+    # nothing says nothing rather than guessing.
+    by_stage = {entry.stage: entry for entry in result.stages}
+    assert by_stage[Stage.CLONED].detail == "1 files \u00b7 Python"
+    assert by_stage[Stage.PARSED].detail == f"{len(result.graph.nodes):,} nodes"
+    assert by_stage[Stage.GRAPH_BUILT].detail == f"{len(result.graph.edges):,} relationships"
 
 
 # ── concurrency: one repo, one pipeline ───────────────────────────────────

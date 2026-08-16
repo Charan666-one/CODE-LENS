@@ -128,6 +128,56 @@ function anchorFor(
   return null;
 }
 
+/** Which way each arrow points, in display coordinates (y grows downward,
+ *  the same as the screen). */
+const ARROW_HEADINGS: Record<string, [number, number]> = {
+  ArrowUp: [0, -1],
+  ArrowDown: [0, 1],
+  ArrowLeft: [-1, 0],
+  ArrowRight: [1, 0],
+};
+
+/** The neighbour of `from` that lies most nearly in `heading`.
+ *
+ *  Only actual neighbours are candidates: the arrows follow relationships, so
+ *  every press is a step along an edge and the reader ends up tracing real
+ *  structure rather than sweeping a region. Among those, direction decides —
+ *  scored by the cosine of the angle to the heading, with ties broken by
+ *  distance so the nearest of two equally-rightward neighbours wins.
+ *
+ *  The 45° cone (`cos > 0.5`) is what makes it feel like a direction rather
+ *  than a shuffle. A neighbour that is mostly upward should not answer →,
+ *  even when it is the only candidate; refusing to move is honest, and the
+ *  reader presses ↑ instead.
+ */
+function neighbourToward(
+  sigma: Sigma,
+  from: string,
+  [hx, hy]: [number, number],
+): string | null {
+  const origin = sigma.getNodeDisplayData(from);
+  if (!origin) return null;
+
+  let best: string | null = null;
+  let bestScore = -Infinity;
+  for (const candidate of sigma.getGraph().neighbors(from)) {
+    const position = sigma.getNodeDisplayData(candidate);
+    if (!position) continue;
+    const dx = position.x - origin.x;
+    const dy = position.y - origin.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance === 0) continue;
+    const cosine = (dx * hx + dy * hy) / distance;
+    if (cosine <= 0.5) continue; // outside the 45° cone
+    const score = cosine - distance / 100_000; // direction first, then nearness
+    if (score > bestScore) {
+      bestScore = score;
+      best = candidate;
+    }
+  }
+  return best;
+}
+
 const easeInOutCubic = (t: number): number =>
   t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 
@@ -164,6 +214,7 @@ export default function GraphCanvas() {
   const rippleFront = useGraphStore((s) => s.rippleFront);
   const advanceRipple = useGraphStore((s) => s.advanceRipple);
   const clearRipple = useGraphStore((s) => s.clearRipple);
+  const setZoom = useGraphStore((s) => s.setZoom);
   const overlay = useGraphStore((s) => s.overlay);
   const clearOverlay = useGraphStore((s) => s.clearOverlay);
 
@@ -633,20 +684,61 @@ export default function GraphCanvas() {
     return () => window.clearInterval(timer);
   }, [phase, advanceReveal]);
 
-  // Escape hatch on keyboard too.
+  // ── the keyboard: the graph without a mouse ─────────────────────────────
+  //
+  // Escape unwinds one layer at a time, 1/2/3 change depth, and the arrows
+  // walk the graph by following edges. Traversal is *spatial* rather than
+  // list order — pressing → goes to the neighbour that is actually to the
+  // right — because the reader is looking at a map, and a key that jumps to
+  // whichever neighbour happens to be first in an adjacency list teaches
+  // nothing about the shape of what they are looking at.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      const state = useGraphStore.getState();
       if (event.key === "Escape") {
-        const state = useGraphStore.getState();
         if (state.phase === "revealing") skipReveal();
         else if (state.rippleFor) clearRipple();
         else if (state.overlay) clearOverlay();
         else select(null);
+        return;
+      }
+
+      // Anything with its own text cursor owns the keystroke. Without this,
+      // typing "3" into ⌘K would silently change the zoom behind the palette.
+      const target = event.target as HTMLElement | null;
+      if (
+        state.paletteOpen ||
+        state.guideOpen ||
+        target?.isContentEditable ||
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement
+      ) {
+        return;
+      }
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+      if (event.key === "1" || event.key === "2" || event.key === "3") {
+        const level = Number(event.key);
+        if (level !== state.zoom) void setZoom(level);
+        return;
+      }
+
+      const heading = ARROW_HEADINGS[event.key];
+      if (!heading) return;
+      const sigma = sigmaRef.current;
+      if (!sigma) return;
+      const graph = sigma.getGraph();
+      const from = anchorFor(graph, state.selectedId, selectedPath);
+      if (!from) return;
+      const next = neighbourToward(sigma, from, heading);
+      if (next) {
+        event.preventDefault(); // arrows would otherwise scroll the page
+        select(next);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [skipReveal, select, clearRipple, clearOverlay]);
+  }, [skipReveal, select, clearRipple, clearOverlay, setZoom, selectedPath]);
 
   return <div ref={containerRef} className="graph-canvas" />;
 }

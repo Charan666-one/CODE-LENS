@@ -105,6 +105,11 @@ export default function GraphGuide() {
           Click to inspect · Double-click to dive in ·{" "}
           <span className="kbd">⌘K</span> for everything else
         </p>
+        <p className="guide-keys">
+          <span className="kbd">1</span> <span className="kbd">2</span>{" "}
+          <span className="kbd">3</span> change depth · arrows follow a
+          relationship · <span className="kbd">Esc</span> steps back
+        </p>
 
         <button className="guide-dismiss" onClick={dismiss}>
           Got it

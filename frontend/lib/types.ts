@@ -53,6 +53,10 @@ export interface PipelineStage {
   stage: string;
   seconds: number;
   skipped: boolean;
+  /** What this stage measured, in one phrase — "412 files · Python", "8,254
+   *  nodes". A count taken from the stage's own result, never an estimate of
+   *  work remaining. `null` when a stage had nothing to count. */
+  detail: string | null;
 }
 
 export interface AnalyzeResponse {
