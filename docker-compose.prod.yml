@@ -1,0 +1,78 @@
+# Production overlay. Use it *with* the base file, never instead of it:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --wait
+#
+# Two changes, both of which matter on a public machine.
+#
+# ## 1. The frontend stops listening on the internet
+#
+# The base file publishes `3000:3000`, which binds every interface. On a
+# laptop that is convenient. On a server with a TLS proxy in front, it means
+# port 3000 is *also* reachable directly — so anyone can skip HTTPS entirely
+# just by adding `:3000` to the URL, and the padlock in the address bar
+# becomes a decoration rather than a guarantee. Binding to 127.0.0.1 leaves
+# exactly one way in: through the proxy.
+#
+# ## 2. Only the proxy's forwarded header is believed
+#
+# `TRUSTED_PROXY_IPS` narrows from "any private address" to the Docker
+# network Caddy actually sits on. See `backend/app/core/clients.py`: a
+# forwarded header is a claim by whoever sent it, so it is believed exactly
+# when the sender is a proxy you have vouched for.
+
+services:
+  backend:
+    environment:
+      # The compose network Caddy shares with the frontend. Nothing else can
+      # reach the backend, and nothing else may be believed about identity.
+      TRUSTED_PROXY_IPS: 172.16.0.0/12
+      # Set your public origin. A browser calling from anywhere else is
+      # refused by CORS. There is no wildcard here on purpose.
+      CORS_ORIGINS: ${CODELENS_PUBLIC_ORIGIN:?set CODELENS_PUBLIC_ORIGIN, e.g. https://codelens.example.com}
+    logging:
+      # Logs are the abuse signal (`request_refused`, `request_blocked`).
+      # Unbounded, they are also a way to fill the disk that the clone-cache
+      # ceiling does not cover.
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+
+  frontend:
+    # `!override`, not a plain list. Compose *merges* `ports` across files
+    # rather than replacing them, so without this the resolved config keeps
+    # the base file's `0.0.0.0:3000` **and** adds the localhost one — port
+    # 3000 stays open to the internet and anyone can skip HTTPS by appending
+    # `:3000` to the URL. The overlay would have read as if it closed the
+    # port while leaving it wide open, which is the worst kind of wrong.
+    # Verify with:
+    #   docker compose -f docker-compose.yml -f docker-compose.prod.yml config
+    # and confirm exactly one published 3000, bound to 127.0.0.1.
+    ports: !override
+      - "127.0.0.1:3000:3000"
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./ops/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and account keys. Losing this volume means re-issuing
+      # from Let's Encrypt, which is rate limited — keep it.
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      CODELENS_PUBLIC_ORIGIN: ${CODELENS_PUBLIC_ORIGIN:?}
+    depends_on:
+      frontend:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+
+volumes:
+  caddy-data:
+  caddy-config:

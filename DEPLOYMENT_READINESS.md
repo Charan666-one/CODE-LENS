@@ -327,10 +327,15 @@ Do that, put a proxy in front, and the verdict is public beta.
 
 ### Assumptions that could not be verified
 
-- **Behaviour behind a real reverse proxy.** `TRUSTED_PROXY_IPS` is tested
-  with unit tests and with a synthetic peer address; no nginx or Cloudflare
-  was in the path. The compose default (private ranges) is read off the
-  network topology, not measured against a public deployment.
+- ~~**Behaviour behind a real reverse proxy.**~~ **Now verified.** The full
+  production stack (Caddy → Next → backend) was booted from
+  `docker-compose.prod.yml` and identity resolution was read out of the
+  backend's own log under load:
+  `request_refused reason=capacity identity=172.18.0.1 peer=172.18.0.4` —
+  the peer is the frontend container, the identity is the real client. The
+  header survives both hops and the backend believes the right half of it.
+  A public deployment with Let's Encrypt issuance is still unrun (it needs
+  real DNS).
 - **Off-host backup and restore.** The local path is verified end to end. S3,
   B2 and restic are documented and unrun.
 - **Sustained multi-hour load.** The load test is a burst plus a quota phase,

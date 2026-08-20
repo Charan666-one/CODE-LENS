@@ -217,30 +217,144 @@ none of the limits above address.
 
 ---
 
-## Deploy
+## Deploy — step by step
 
-### Anywhere that runs compose
+This is the path that is actually tested: one small VM, Docker, and Caddy
+terminating TLS. Roughly 20 minutes, most of it waiting for DNS.
 
-A VM with Docker is the whole requirement.
+### 0. What you need first
 
-```bash
-git clone <this repo> && cd CODELENS
-docker compose up -d --build --wait
+| | |
+|---|---|
+| A VM | 2 vCPU, 4 GB RAM, 40 GB disk. Hetzner CX22, DigitalOcean, Vultr, Lightsail — any of them. **1 GB is not enough**: the backend alone is capped at 2 GB. |
+| A domain | A subdomain is fine (`codelens.yourdomain.com`). |
+| Docker | Engine + Compose v2.24 or newer, on the VM. |
+
+### 1. Point DNS at the machine, and wait
+
+```
+A    codelens.yourdomain.com    ->    <your server IP>
 ```
 
-Put TLS in front of `:3000` — Caddy or nginx, whichever you already run. The
-frontend expects to be the origin the browser sees, so terminate TLS and
-proxy to it rather than rewriting paths.
-
-To update:
+Do this **first**. Caddy asks Let's Encrypt for a certificate on its first
+start, and Let's Encrypt validates by connecting back to that hostname. If
+DNS has not propagated yet, issuance fails and Caddy retries with a backoff
+that gets slow. Confirm before continuing:
 
 ```bash
-git pull && docker compose up -d --build --wait
+dig +short codelens.yourdomain.com     # must print your server IP
 ```
 
-The named volumes survive it. `codelens-data` holds the analysed graphs;
-losing it means re-analysing everything, which is slow but not lossy.
-`codelens-clones` is a cache and can be dropped at any time.
+### 2. Install Docker on the VM
+
+```bash
+ssh root@<your server IP>
+curl -fsSL https://get.docker.com | sh
+docker compose version                 # must be v2.24 or newer
+```
+
+### 3. Get the code onto it
+
+```bash
+git clone <your repo url> /srv/codelens
+cd /srv/codelens
+```
+
+### 4. Set the one required variable
+
+```bash
+cat > .env <<'EOF'
+CODELENS_PUBLIC_ORIGIN=https://codelens.yourdomain.com
+EOF
+chmod 600 .env
+```
+
+Include the scheme. It becomes `CORS_ORIGINS`, so a mismatch here is a
+browser-side CORS failure that reads like a frontend bug.
+
+Nothing else is required. Narration stays off, and every limit has a working
+default.
+
+### 5. Check what you are about to start
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml config | grep -A4 "ports:"
+```
+
+**Confirm the frontend publishes `127.0.0.1:3000` and nothing else**, and that
+the backend publishes nothing at all. Compose *merges* port lists across
+files rather than replacing them, so this overlay uses `!override` — without
+it, the base file's `0.0.0.0:3000` would survive and anyone could skip HTTPS
+by appending `:3000` to the URL. Verify rather than assume; it is one command.
+
+### 6. Start it
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --wait
+```
+
+First run builds both images (3–6 minutes). `--wait` returns only once every
+healthcheck passes, so if it returns cleanly, the stack is genuinely up.
+
+### 7. Verify from your own machine, not the server
+
+```bash
+curl -sI https://codelens.yourdomain.com | head -3            # 200, valid TLS
+curl -s -m 5 http://<server ip>:3000/ ; echo "exit=$?"        # must FAIL — exit 7 or 28
+curl -s -m 5 http://<server ip>:8000/health ; echo "exit=$?"  # must FAIL
+```
+
+The two failures matter as much as the success. They are the difference
+between "TLS is available" and "TLS is the only way in".
+
+Then open the site and analyse a repository end to end.
+
+### 8. Turn on backups — this is the part people skip
+
+```bash
+mkdir -p /var/backups/codelens
+(crontab -l 2>/dev/null; echo "0 3 * * * cd /srv/codelens && ops/backup.sh /var/backups/codelens") | crontab -
+ops/backup.sh /var/backups/codelens          # run once now
+```
+
+**Then copy them off the machine and restore one from there.** A backup that
+shares a disk with its source is not a backup — it is a second copy of the
+thing that will fail. `rclone`, `restic`, `aws s3 sync`, whatever you already
+use. Until a restore from off-host has actually worked, treat this instance
+as staging rather than beta.
+
+```bash
+ops/restore.sh /var/backups/codelens/<file>.db --verify-only
+```
+
+### 9. Watch it
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f backend
+docker compose logs backend | grep -c request_refused    # is anyone hitting limits
+docker system df                                          # volume growth
+```
+
+### Updating later
+
+```bash
+cd /srv/codelens && git pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --wait
+```
+
+Named volumes survive. In-flight analyses do not — they come back as
+`interrupted` with a message telling the user to run it again, which is the
+designed behaviour, not a failure.
+
+### If something is wrong
+
+| symptom | cause |
+|---|---|
+| Caddy loops on certificate errors | DNS is not pointing here yet. Fix DNS, `docker compose restart caddy`. |
+| Browser CORS error | `CODELENS_PUBLIC_ORIGIN` does not exactly match the URL, scheme included. |
+| Analysis fails, service healthy | `git` missing from the backend image — it is a *runtime* dependency; the image starts fine without it and fails on the first clone. |
+| Everything returns 503 | Concurrency slots leaked, or two analyses genuinely running. `docker compose restart backend`. |
+| Port 3000 reachable from outside | Step 5 was skipped. |
 
 ### Platforms that build from a Dockerfile
 
