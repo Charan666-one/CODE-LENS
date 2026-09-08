@@ -57,7 +57,22 @@ not there. Entries are appended, never edited.
 
 **Three depths, one world.** L1 districts → L2 files → L3 symbols. Clicking a
 district flies into it rather than switching a tab; the graph is the interface
-and nothing else is permanent chrome.
+and almost nothing else is permanent chrome.
+
+**Flat or deep, same world.** A 2D/3D toggle sits beside the depth buttons. In
+the deep view the third axis is a measured fact rather than a look: height is
+position in the import stack, where the surface is everything nothing imports —
+entry points included — and each layer below is one import deeper, so a file
+always sits under whatever leans on it. Both views are drawn from one
+choreography module ([`choreography.ts`](frontend/lib/choreography.ts)), so the
+reveal, the ripple, the overlays and the relevance hierarchy cannot drift apart
+between them. Node size and edge width stay measured in pixels in 3D on
+purpose: a sphere shrinking with distance would turn "how much the project
+leans on this" into "how far away the camera is".
+
+**Find it by name.** A search field is on screen from the moment a graph is —
+`/` focuses it — and a hit moves the camera, changing depth when the level on
+screen cannot draw what was asked for. There is no results page.
 
 **Blast radius.** The reverse transitive closure from any node, ranked over
 four normalised signals — distance, co-change strength, churn, and structural
@@ -161,7 +176,8 @@ ingest ──▶ parse ──▶ resolve ──▶ metrics ──▶ store
         │               │
         └──────┬────────┘
                ▼
-       FastAPI  ──▶  Next.js + sigma.js (WebGL)
+       FastAPI  ──▶  Next.js  ──▶  sigma.js (flat) │ three.js (deep)
+                            one choreography, two renderers
 ```
 
 Parsing is two passes: each file records what it *saw*, then a whole-repo pass
