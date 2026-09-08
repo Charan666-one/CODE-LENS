@@ -11,6 +11,13 @@ export interface ViewNode {
   color: string;
   cluster: string;
   assembly_index: number;
+  /** The depth axis. `depth` is the fact — the longest chain of imports that
+   *  arrives at this file, so nothing sits above what leans on it — and `z`
+   *  is that fact placed in the same coordinate space as x and y. Optional
+   *  because a spec compiled by an older backend has neither, and a flat
+   *  renderer that ignores both is still correct. */
+  depth?: number;
+  z?: number;
   risk: number;
   fan_in: number;
   is_entrypoint: boolean;

@@ -8,6 +8,7 @@ import {
   fetchViewSpec,
   runQuery,
 } from "./api";
+import type { SearchHit } from "./search";
 import type {
   BlastResult,
   EndpointRef,
@@ -30,6 +31,11 @@ import type {
  */
 
 export type Phase = "idle" | "understanding" | "revealing" | "exploring";
+
+export type Dimension = "2d" | "3d";
+
+/** Where the reader's choice of view is kept between visits. */
+export const DIMENSION_KEY = "codelens.dimension";
 
 interface GraphState {
   phase: Phase;
@@ -91,6 +97,21 @@ interface GraphState {
   paletteOpen: boolean;
   setPalette: (open: boolean) => void;
 
+  /** Flat or deep.
+   *
+   *  Not a different product — the same ViewSpec, the same choreography, the
+   *  same encodings. The deep view adds one axis the flat one cannot draw:
+   *  height is how far down the import stack a file sits. A preference, and
+   *  nothing about the data changes with it.
+   *
+   *  Starts flat on purpose, and **must** start flat rather than reading
+   *  storage here: the top bar renders on the server, and a stored value read
+   *  at module scope would make the first client render disagree with it.
+   *  `HUD` restores the reader's choice in an effect instead.
+   */
+  dimension: Dimension;
+  setDimension: (dimension: Dimension) => void;
+
   /** The Graph Guide. Shown once unprompted on a first graph, then on
    *  request only — L1/L2/L3 is the least self-explanatory thing here and
    *  the explanation is worth exactly one interruption. */
@@ -106,6 +127,16 @@ interface GraphState {
   pendingFocus: string | null;
   dive: (nodeId: string) => Promise<void>;
   consumeFocus: () => void;
+
+  /** Search, as navigation.
+   *
+   *  A hit is a place on the map, so choosing one has to *arrive* — and the
+   *  level showing files cannot draw a function, nor L1 a file. Picking a
+   *  result therefore moves the camera and, when it has to, the depth: the
+   *  shallowest level that can actually draw the thing asked for. Without
+   *  this, half of every search silently did nothing.
+   */
+  goTo: (hit: SearchHit) => Promise<void>;
 
   /** A query's answer, drawn ON the graph.
    *
@@ -295,6 +326,16 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   guideOpen: false,
   setGuide: (open) => set({ guideOpen: open }),
 
+  dimension: "2d",
+  setDimension: (dimension) => {
+    set({ dimension });
+    try {
+      window.localStorage.setItem(DIMENSION_KEY, dimension);
+    } catch {
+      /* storage disabled — the choice still holds for this session */
+    }
+  },
+
   pendingFocus: null,
   consumeFocus: () => set({ pendingFocus: null }),
 
@@ -309,6 +350,19 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     // sideways to another view.
     set({ pendingFocus: node.kind === "cluster" ? node.label : node.cluster });
     await get().setZoom(zoom + 1);
+  },
+
+  goTo: async (hit) => {
+    const { spec, zoom } = get();
+    // Symbols only exist at L3; files and modules first appear at L2. If the
+    // level on screen already draws the hit — or the file holding it, which
+    // is how a symbol is represented one level up — stay where the reader is.
+    const target = hit.kind === "function" || hit.kind === "class" ? 3 : 2;
+    if (!drawable(spec, hit) && zoom !== target) await get().setZoom(target);
+    // The graph foregrounds one answer at a time; landing a search on a node
+    // an overlay has dimmed is arriving in the dark.
+    set({ paletteOpen: false, overlay: null, overlayError: null });
+    get().select(hit.id);
   },
 
   overlay: null,
@@ -344,6 +398,18 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
   clearOverlay: () => set({ overlay: null, overlayError: null }),
 }));
+
+/** Can the level currently on screen show this hit at all?
+ *
+ *  Either as itself, or as the file that contains it — the substitution the
+ *  renderer and the ripple both already make for a symbol at L2.
+ */
+function drawable(spec: ViewSpec | null, hit: SearchHit): boolean {
+  if (!spec) return false;
+  return spec.nodes.some(
+    (node) => node.id === hit.id || (!!hit.path && node.id === `file:${hit.path}`),
+  );
+}
 
 /** Some answers are made of distinct groups rather than one set. A cycle is
  *  only meaningful as a loop, so the renderer needs them kept apart. */

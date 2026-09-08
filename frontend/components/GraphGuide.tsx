@@ -42,6 +42,7 @@ export default function GraphGuide() {
   const phase = useGraphStore((s) => s.phase);
   const open = useGraphStore((s) => s.guideOpen);
   const setGuide = useGraphStore((s) => s.setGuide);
+  const dimension = useGraphStore((s) => s.dimension);
 
   // Shown once, unprompted, the first time someone reaches a graph — that is
   // the only moment the explanation is worth interrupting for. After that it
@@ -92,6 +93,14 @@ export default function GraphGuide() {
         </ol>
 
         <div className="guide-legend">
+          {/* Only in the deep view, because a legend must describe what is
+              actually on screen — the flat map has no height to explain. */}
+          {dimension === "3d" && (
+            <Legend
+              label="Height"
+              meaning="How deep in the import stack it sits. Nothing rests on the top layer; everything below is imported by something above it."
+            />
+          )}
           <Legend label="Size" meaning="How much the project leans on it." />
           <Legend label="Colour" meaning="Calm blue to hot red as risk rises. Green starts a run." />
           <Legend label="Line brightness" meaning="How close it is to whatever you selected." />
@@ -103,6 +112,7 @@ export default function GraphGuide() {
 
         <p className="guide-keys">
           Click to inspect · Double-click to dive in ·{" "}
+          <span className="kbd">/</span> finds anything by name ·{" "}
           <span className="kbd">⌘K</span> for everything else
         </p>
         <p className="guide-keys">
@@ -110,6 +120,12 @@ export default function GraphGuide() {
           <span className="kbd">3</span> change depth · arrows follow a
           relationship · <span className="kbd">Esc</span> steps back
         </p>
+        {dimension === "3d" && (
+          <p className="guide-keys">
+            Drag to orbit · scroll to move closer · the arrows follow the
+            picture you are looking at, so turning the view changes where they go
+          </p>
+        )}
 
         <button className="guide-dismiss" onClick={dismiss}>
           Got it

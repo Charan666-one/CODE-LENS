@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { searchRepo } from "@/lib/api";
+import { useConceptSearch } from "@/lib/search";
 import { useGraphStore } from "@/lib/store";
 
 /** ⌘K — where the power lives so the chrome doesn't have to hold it.
@@ -26,17 +26,16 @@ export default function CommandPalette() {
   const setPalette = useGraphStore((s) => s.setPalette);
   const setZoom = useGraphStore((s) => s.setZoom);
   const runOverlay = useGraphStore((s) => s.runOverlay);
-  const select = useGraphStore((s) => s.select);
+  const goTo = useGraphStore((s) => s.goTo);
   const showRipple = useGraphStore((s) => s.showRipple);
   const toggleDetail = useGraphStore((s) => s.toggleDetail);
   const selectedId = useGraphStore((s) => s.selectedId);
-  const snapshotId = useGraphStore((s) => s.snapshotId);
   const spec = useGraphStore((s) => s.spec);
 
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
-  const [matches, setMatches] = useState<{ id: string; name: string; path: string }[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+  const { hits: matches } = useConceptSearch(query, open, 6);
 
   const commands = useMemo<Command[]>(() => {
     const graphId =
@@ -151,43 +150,9 @@ export default function CommandPalette() {
     if (open) {
       setQuery("");
       setCursor(0);
-      setMatches([]);
       inputRef.current?.focus();
     }
   }, [open]);
-
-  // Concept search, already on the backend and never before reachable.
-  useEffect(() => {
-    const text = query.trim();
-    if (!open || snapshotId === null || text.length < 2) {
-      setMatches([]);
-      return;
-    }
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      void searchRepo(snapshotId, text, 6)
-        .then((result) => {
-          if (cancelled) return;
-          setMatches(
-            result.ranked.map((entry) => {
-              const reasons = entry.reasons as { name?: string; file_path?: string };
-              return {
-                id: entry.node_id,
-                name: reasons.name ?? entry.node_id.split(":").slice(1).join(":"),
-                path: reasons.file_path ?? "",
-              };
-            }),
-          );
-        })
-        .catch(() => {
-          if (!cancelled) setMatches([]);
-        });
-    }, 160); // one request per pause, not per keystroke
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [query, open, snapshotId]);
 
   if (phase !== "exploring" && phase !== "revealing") return null;
   if (!open) return null;
@@ -202,9 +167,9 @@ export default function CommandPalette() {
     if (!row) return;
     if (row.kind === "command") row.command.run();
     else {
-      // A search result moves the graph. There is no results page.
-      select(row.match.id);
-      setPalette(false);
+      // A search result moves the graph. There is no results page — and
+      // `goTo` changes depth when the level on screen cannot draw the hit.
+      void goTo(row.match);
     }
   };
 

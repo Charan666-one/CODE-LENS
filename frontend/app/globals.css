@@ -121,6 +121,46 @@ button {
     var(--bg);
 }
 
+/* ── the deep view ───────────────────────────────────────────────────── */
+/* Same canvas, one more axis. The only chrome it adds is its own labels,
+   which are DOM rather than WebGL text — legible at any angle, and no font
+   atlas to ship. */
+
+.graph3d canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.graph3d-labels {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.graph3d-label {
+  color: #cbd5e1;
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+  /* A halo, not a box: in perspective a label can land over a bright node,
+     and the flat view never had to solve that. */
+  text-shadow:
+    0 0 4px var(--bg),
+    0 0 8px var(--bg);
+}
+
+.graph3d-label[data-forced="1"] {
+  color: var(--text);
+}
+
+/* The 2D/3D pair reuses the level buttons' shape — they are the same kind of
+   control, and inventing a second one would say they were not. */
+.dimension {
+  margin-right: var(--s2);
+}
+
 /* ── the landing ─────────────────────────────────────────────────────── */
 
 .overlay {
@@ -273,7 +313,12 @@ button {
   align-items: center;
   gap: var(--s4);
   padding: var(--s3) var(--s4);
-  z-index: 5;
+  /* Above the inspector, which starts 32px down and reached up over the level
+     buttons: with the bar underneath, L1/L2/L3 and ⌘K could not be clicked
+     while a node was selected, and the search results opened behind the
+     panel. The bar is a stacking context, so its own z-index is what decides
+     this for everything inside it. */
+  z-index: 7;
   background: linear-gradient(to bottom, rgba(6, 10, 19, 0.9), transparent);
 }
 
@@ -329,6 +374,128 @@ button {
   color: #082032;
   background: var(--accent);
   border-color: var(--accent);
+}
+
+/* ── search ──────────────────────────────────────────────────────────── */
+/* The one control that is always on screen once a graph exists. Finding a
+   file is the first thing anyone wants from a map, and a keyboard shortcut
+   nobody can see is not an answer to it. */
+
+.search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: min(300px, 34vw);
+  padding: 0 var(--s3);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r-full);
+  transition: border-color var(--fast) var(--ease);
+}
+
+.search:focus-within {
+  border-color: var(--line-strong);
+}
+
+.search-icon {
+  color: var(--muted);
+  font-size: var(--text-label);
+  line-height: 1;
+}
+
+.search-input {
+  flex: 1;
+  min-width: 0;
+  padding: var(--s2) 0;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--text-ui);
+  outline: none;
+  appearance: none;
+}
+
+.search-input::placeholder {
+  color: var(--muted);
+}
+
+/* The browser's own clear affordance for type=search is a second, differently
+   shaped control inside a field that already has an Escape key. */
+.search-input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.search-kbd {
+  flex-shrink: 0;
+}
+
+.search-results {
+  position: absolute;
+  top: calc(100% + var(--s2));
+  left: 0;
+  right: 0;
+  z-index: 20;
+  list-style: none;
+  max-height: 52vh;
+  overflow-y: auto;
+  padding: var(--s1);
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow);
+}
+
+.search-row {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-ui);
+  text-align: left;
+  cursor: pointer;
+}
+
+.search-row.active {
+  background: rgba(125, 211, 252, 0.12);
+  color: var(--accent);
+}
+
+.search-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* What kind of thing it is decides which depth can draw it, so it is worth
+   a word rather than an icon. */
+.search-kind {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--text-meta);
+}
+
+.search-path {
+  margin-left: auto;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--text-meta);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-note {
+  padding: var(--s3);
+  color: var(--muted);
+  font-size: var(--text-meta);
 }
 
 /* ── the bottom readout ──────────────────────────────────────────────── */
@@ -953,6 +1120,34 @@ button {
   .hud-top {
     padding: var(--s2) var(--s3);
     gap: var(--s2);
+  }
+
+  /* The repo name is already in the address bar, and the product name is the
+     least load-bearing thing in a bar this crowded — the 2D/3D pair pushed
+     the field down to 37px, which is an icon, not somewhere you can type.
+     Both go; what is left is all controls. */
+  .repo,
+  .brand {
+    display: none;
+  }
+
+  .search {
+    /* Shrinkable, but not to nothing: it gives ground to the buttons rather
+       than pushing L3 off the edge, and stops at the width where it is still
+       a field you can read your own query in. */
+    flex: 1 1 0;
+    width: auto;
+    min-width: 96px;
+  }
+
+  /* The field is now too narrow to hang a list of paths under. The results
+     leave it and span the screen instead — the same move the palette makes,
+     and for the same reason. */
+  .search-results {
+    position: fixed;
+    top: 3.25rem;
+    left: var(--s3);
+    right: var(--s3);
   }
 
   .hero form {

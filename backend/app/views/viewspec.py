@@ -60,6 +60,15 @@ _MAX_DISTRICT_DEPTH = 4
 _MAX_L3_MEMBER_FILES = 120
 _MAX_MEMBERS_PER_FILE = 12
 
+#: How tall the depth axis stands, as a share of how wide the map is.
+#:
+#: A fixed number of world units cannot work: the plan is laid out on a ring
+#: whose size follows the repository, so 220 units of drop reads as a real
+#: third axis on a 60-file library and as a flat sheet across n8n's 1,464-unit
+#: sprawl. Tying the two together keeps the same picture at every scale —
+#: clearly stacked, never a tower.
+_DEPTH_SHARE = 0.55
+
 
 def _cap_by_fan_in(files: list[Node], view: GraphView, cap: int) -> list[Node]:
     """Keep the `cap` most-connected files — the hubs a person would look for
@@ -80,6 +89,12 @@ class ViewNode(BaseModel):
     color: str
     cluster: str
     assembly_index: int
+    #: The third axis, for renderers that have one. `depth` is the fact —
+    #: hops through IMPORTS from the nearest entrypoint file — and `z` is that
+    #: fact placed in the same coordinate space as x and y, the same way
+    #: `risk` is the fact behind `color`. A 2D renderer ignores both.
+    depth: int = 0
+    z: float = 0.0
     risk: float = 0.0
     fan_in: int = 0
     is_entrypoint: bool = False
@@ -136,6 +151,8 @@ def compile_viewspec(graph: KnowledgeGraph, *, zoom: int = 2) -> ViewSpec:
     cluster_of = _assign_clusters(files, deep=zoom == 1)
     risk_of = _risk_per_file(view, files)
     assembly = _assembly_order(view, files)
+    depth_of = _depth_layers(view, files)
+    depth_meta = {"depth_max": max(depth_of.values(), default=0)}
 
     cluster_ids = sorted(set(cluster_of.values()))
     centers = _ring_positions(cluster_ids, [
@@ -143,13 +160,16 @@ def compile_viewspec(graph: KnowledgeGraph, *, zoom: int = 2) -> ViewSpec:
     ])
 
     if zoom == 1:
-        spec = _district_view(graph, view, files, cluster_of, centers, risk_of, assembly)
+        spec = _district_view(
+            graph, view, files, cluster_of, centers, risk_of, assembly, depth_of,
+            depth_meta,
+        )
     else:
         spec = _street_view(
-            graph, view, files, cluster_of, centers, risk_of, assembly,
-            include_members=zoom == 3,
+            graph, view, files, cluster_of, centers, risk_of, assembly, depth_of,
+            depth_meta, include_members=zoom == 3,
         )
-    return _recenter(spec)
+    return _recenter(_scale_depth(spec))
 
 
 def _recenter(spec: ViewSpec) -> ViewSpec:
@@ -166,9 +186,15 @@ def _recenter(spec: ViewSpec) -> ViewSpec:
         return spec
     cx = sum(node.x for node in spec.nodes) / len(spec.nodes)
     cy = sum(node.y for node in spec.nodes) / len(spec.nodes)
+    # The depth axis is centred for the same reason the other two are: a
+    # repository whose layers all sit below zero would hang off the bottom of
+    # whatever box a renderer fits around it. `depth` keeps the unshifted
+    # fact, so nothing is lost by moving `z`.
+    cz = sum(node.z for node in spec.nodes) / len(spec.nodes)
     for node in spec.nodes:
         node.x -= cx
         node.y -= cy
+        node.z -= cz
     for cluster in spec.clusters:
         cluster.x -= cx
         cluster.y -= cy
@@ -186,6 +212,8 @@ def _district_view(
     centers: dict[str, tuple[float, float, float]],
     risk_of: dict[str, float],
     assembly: dict[str, int],
+    depth_of: dict[str, int],
+    depth_meta: dict[str, object],
 ) -> ViewSpec:
     """Top-level modules as single nodes; cross-module dependencies as flows."""
     members: dict[str, list[Node]] = {}
@@ -196,6 +224,10 @@ def _district_view(
     for cluster_id, cluster_files in sorted(members.items()):
         x, y, radius = centers[cluster_id]
         risk = max((risk_of.get(f.id, 0.0) for f in cluster_files), default=0.0)
+        # The shallowest member decides, the same way `assembly_index` below
+        # takes the earliest: a district is as near the surface as its nearest
+        # way in, not as far down as its deepest corner.
+        depth = min((depth_of.get(f.id, 0) for f in cluster_files), default=0)
         nodes.append(
             ViewNode(
                 id=f"cluster:{cluster_id}",
@@ -204,6 +236,7 @@ def _district_view(
                 x=x,
                 y=y,
                 size=radius,
+                depth=depth,
                 color=_risk_color(risk),
                 cluster=cluster_id,
                 assembly_index=min(assembly.get(f.id, 10_000) for f in cluster_files),
@@ -247,7 +280,7 @@ def _district_view(
         nodes=nodes,
         edges=sorted(flows.values(), key=lambda e: (-e.weight, e.source, e.target)),
         clusters=[],
-        meta={"districts": len(members), "files": len(files)},
+        meta={"districts": len(members), "files": len(files), **depth_meta},
     )
 
 
@@ -262,6 +295,8 @@ def _street_view(
     centers: dict[str, tuple[float, float, float]],
     risk_of: dict[str, float],
     assembly: dict[str, int],
+    depth_of: dict[str, int],
+    depth_meta: dict[str, object],
     *,
     include_members: bool,
 ) -> ViewSpec:
@@ -299,6 +334,7 @@ def _street_view(
             x, y = _spiral_position(cx, cy, radius, position, len(cluster_files))
             positions[file.id] = (x, y)
             fan_in = view.fan_in(file.id, DEPENDENCY_KINDS)
+            depth = depth_of.get(file.id, 0)
             nodes.append(
                 ViewNode(
                     id=file.id,
@@ -306,6 +342,7 @@ def _street_view(
                     kind=file.kind.value,
                     x=x,
                     y=y,
+                    depth=depth,
                     size=3.0 + min(9.0, 1.5 * math.sqrt(fan_in)),
                     color=(
                         _ACCENT_ENTRYPOINT
@@ -324,7 +361,7 @@ def _street_view(
 
     if include_members:
         nodes.extend(
-            _member_nodes(view, files, positions, cluster_of, assembly)
+            _member_nodes(view, files, positions, cluster_of, assembly, depth_of)
         )
 
     node_ids = {n.id for n in nodes}
@@ -341,6 +378,10 @@ def _street_view(
             "files": total_files,
             "rendered_nodes": len(nodes),
             "truncated": truncated,
+            # How tall the stack is. A renderer drawing the depth axis needs
+            # it to scale the axis, and deriving it from the nodes would be the
+            # frontend computing truth.
+            **depth_meta,
         },
     )
 
@@ -351,6 +392,7 @@ def _member_nodes(
     positions: dict[str, tuple[float, float]],
     cluster_of: dict[str, str],
     assembly: dict[str, int],
+    depth_of: dict[str, int],
 ) -> list[ViewNode]:
     """Classes and functions orbit their file at L3 — for the files worth
     expanding. Only the most-connected files get an orbit, and each orbit is
@@ -375,6 +417,7 @@ def _member_nodes(
                 )
         # Most-connected members first, then bound the orbit.
         satellites.sort(key=lambda m: (-view.fan_in(m.id, DEPENDENCY_KINDS), m.id))
+        depth = depth_of.get(file.id, 0)
         for position, member in enumerate(satellites[:_MAX_MEMBERS_PER_FILE]):
             angle = position * 2.399963  # golden angle: no two satellites overlap
             orbit = 4.0 + 1.2 * (position % 5)
@@ -386,6 +429,14 @@ def _member_nodes(
                     kind=member.kind.value,
                     x=fx + orbit * math.cos(angle),
                     y=fy + orbit * math.sin(angle),
+                    # A member sits at its file's depth exactly — it *is* that
+                    # file, one level in. Spreading the orbit vertically would
+                    # look better and mean nothing: layers are counted between
+                    # files, so a per-satellite height would be the one thing
+                    # this axis is not allowed to be, which is decoration on a
+                    # truth axis. The orbit is already in x and y; here it is a
+                    # flat disc, and a flat disc is the honest picture.
+                    depth=depth,
                     size=1.2 + min(4.0, 0.8 * math.sqrt(fan_in)),
                     color=_ACCENT_ENTRYPOINT if member.is_entrypoint else "#94a3b8",
                     cluster=cluster_of[file.id],
@@ -524,15 +575,96 @@ def _contained_complexity(view: GraphView, file_id: str) -> int:
     return total
 
 
+def _depth_layers(view: GraphView, files: list[Node]) -> dict[str, int]:
+    """The vertical axis: how deep in the import stack each file sits.
+
+    A file's layer is the **longest** chain of imports that arrives at it. Not
+    the shortest — that was the first attempt and it draws the wrong picture.
+    Shortest distance puts a shared helper directly under whoever imports it
+    first, so `types.py`, imported by a top-level module *and* by everything
+    else, lands at the top of the stack next to the code that starts the
+    program. The longest chain says the true thing instead: a file sits below
+    everything that leans on it, however far the longest path to it runs, so
+    every import on screen points downward and the leaves settle at the floor.
+
+    Layer 0 is the surface: entrypoint files, and files nothing in the
+    repository imports. Both are "nothing rests on this" — one because
+    execution starts there, the other because it is the top of a dependency
+    chain. A library has no `__main__` anywhere and would otherwise have no
+    surface at all; this is why jinja rendered as two flat bands before.
+
+    Entrypoints are pinned to the surface even when something does import them
+    — a test importing `main.py` does not make `main.py` a detail of the test.
+
+    Import cycles have no layering; that is what a cycle *is*. Their members
+    take one layer below the deepest thing outside the loop that reaches them,
+    which is where the loop as a whole sits.
+    """
+    file_ids = {file.id for file in files}
+    pinned = {file.id for file in files if _contains_entrypoint(view, file)}
+
+    incoming: dict[str, set[str]] = {file_id: set() for file_id in file_ids}
+    outgoing: dict[str, set[str]] = {file_id: set() for file_id in file_ids}
+    for source, target in view.subgraph({EdgeKind.IMPORTS}).edges():
+        if source not in file_ids or target not in file_ids or source == target:
+            continue
+        if target in pinned:
+            continue  # the surface stays the surface
+        incoming[target].add(source)
+        outgoing[source].add(target)
+
+    # Longest-path layering, by Kahn's algorithm: a file's layer is settled
+    # only once every file that imports it has been placed.
+    layer: dict[str, int] = {}
+    remaining = {file_id: len(incoming[file_id]) for file_id in file_ids}
+    queue: deque[str] = deque(sorted(f for f in file_ids if remaining[f] == 0))
+    for file_id in queue:
+        layer[file_id] = 0
+    while queue:
+        current = queue.popleft()
+        for nxt in sorted(outgoing[current]):
+            layer[nxt] = max(layer.get(nxt, 0), layer[current] + 1)
+            remaining[nxt] -= 1
+            if remaining[nxt] == 0:
+                queue.append(nxt)
+
+    # Whatever is left is inside a cycle: it never reaches zero predecessors.
+    # Deterministic, and in id order so the answer never depends on hashing.
+    for file_id in sorted(f for f in file_ids if f not in layer):
+        placed = [layer[source] for source in incoming[file_id] if source in layer]
+        layer[file_id] = (max(placed) + 1) if placed else 0
+    return layer
+
+
+def _scale_depth(spec: ViewSpec) -> ViewSpec:
+    """Turn each node's layer into a height, once the plan is known.
+
+    Layers are counted before anything is positioned, but how far apart they
+    should sit is a question about *this* layout: the answer has to be read
+    off the map that was actually drawn. So the axis is scaled last, against
+    the width of what it stands over.
+
+    Deterministic: a fixed share of an already-deterministic extent.
+    """
+    deepest = max((node.depth for node in spec.nodes), default=0)
+    if deepest == 0:
+        return spec  # one layer: there is no stack to space out
+    xs = [node.x for node in spec.nodes]
+    ys = [node.y for node in spec.nodes]
+    plan = max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+    gap = plan * _DEPTH_SHARE / deepest
+    for node in spec.nodes:
+        node.z = -node.depth * gap
+    return spec
+
+
 def _assembly_order(view: GraphView, files: list[Node]) -> dict[str, int]:
     """Entrypoint files first, then BFS outward through IMPORTS — the reveal
     replays how execution actually reaches the code (EXPERIENCE.md)."""
     imports_view = view.subgraph({EdgeKind.IMPORTS})
     seeds = sorted(f.id for f in files if _contains_entrypoint(view, f))
-    order: dict[str, int] = {}
+    order: dict[str, int] = {seed: 0 for seed in seeds}
     queue: deque[str] = deque(seeds)
-    for seed in seeds:
-        order[seed] = 0
     while queue:
         current = queue.popleft()
         for _, neighbour in imports_view.out_edges(current):

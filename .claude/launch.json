@@ -4,14 +4,33 @@
     {
       "name": "backend",
       "runtimeExecutable": "/Users/srisaicharanp/Desktop/PENDING PROJECTS/CODELENS/backend/.venv/bin/python",
-      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--port", "8000"],
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "app.main:app",
+        "--port",
+        "8000"
+      ],
       "cwd": "/Users/srisaicharanp/Desktop/PENDING PROJECTS/CODELENS/backend",
       "port": 8000
     },
     {
       "name": "frontend",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
+      "cwd": "frontend",
+      "port": 3000
+    },
+    {
+      "name": "frontend-prod",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "start"
+      ],
       "cwd": "frontend",
       "port": 3000
     }
