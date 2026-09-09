@@ -928,6 +928,33 @@ button {
 
 
 
+/* ── the notice ──────────────────────────────────────────────────────── */
+/* A request that did not complete, said once, near the readout the reader is
+   already watching. It clears itself on the next thing that works. */
+
+.notice-bar {
+  position: absolute;
+  bottom: var(--s6);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  max-width: min(560px, 92vw);
+  padding: var(--s2) var(--s3);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--warn);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow);
+}
+
+.notice-text {
+  color: var(--text);
+  font-size: var(--text-meta);
+}
+
 /* ── the impact readout ──────────────────────────────────────────────── */
 /* Orange is reserved for the blast radius and nothing else, so the caption
    and the wave are unmistakably the same event. */

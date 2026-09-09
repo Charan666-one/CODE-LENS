@@ -36,6 +36,8 @@ export default function HUD() {
   const rippleEndpoints = useGraphStore((s) => s.rippleEndpoints);
   const dimension = useGraphStore((s) => s.dimension);
   const setDimension = useGraphStore((s) => s.setDimension);
+  const notice = useGraphStore((s) => s.notice);
+  const clearNotice = useGraphStore((s) => s.clearNotice);
 
   // Restore the reader's last choice here rather than in the store, because
   // this bar is rendered on the server: a stored value read at module scope
@@ -111,6 +113,20 @@ export default function HUD() {
           </span>
           {overlay.detail && <span className="overlay-detail">{overlay.detail}</span>}
           <button className="overlay-clear" onClick={clearOverlay} aria-label="Clear">
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* When something the reader asked for did not happen. Above the
+          readout rather than beside the overlay bar, because the two can be
+          true at once and a notice must never sit on top of the answer it is
+          apologising about. Yellow: a request did not complete, which is a
+          warning, not a broken product. */}
+      {notice && (
+        <div className="notice-bar" role="status">
+          <span className="notice-text">{notice}</span>
+          <button className="overlay-clear" onClick={clearNotice} aria-label="Dismiss">
             ✕
           </button>
         </div>
