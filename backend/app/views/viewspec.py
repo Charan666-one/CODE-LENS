@@ -213,7 +213,7 @@ def _district_view(
     risk_of: dict[str, float],
     assembly: dict[str, int],
     depth_of: dict[str, int],
-    depth_meta: dict[str, object],
+    depth_meta: dict[str, int],
 ) -> ViewSpec:
     """Top-level modules as single nodes; cross-module dependencies as flows."""
     members: dict[str, list[Node]] = {}
@@ -296,7 +296,7 @@ def _street_view(
     risk_of: dict[str, float],
     assembly: dict[str, int],
     depth_of: dict[str, int],
-    depth_meta: dict[str, object],
+    depth_meta: dict[str, int],
     *,
     include_members: bool,
 ) -> ViewSpec:
@@ -663,7 +663,7 @@ def _assembly_order(view: GraphView, files: list[Node]) -> dict[str, int]:
     replays how execution actually reaches the code (EXPERIENCE.md)."""
     imports_view = view.subgraph({EdgeKind.IMPORTS})
     seeds = sorted(f.id for f in files if _contains_entrypoint(view, f))
-    order: dict[str, int] = {seed: 0 for seed in seeds}
+    order: dict[str, int] = dict.fromkeys(seeds, 0)
     queue: deque[str] = deque(seeds)
     while queue:
         current = queue.popleft()
