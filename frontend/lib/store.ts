@@ -178,6 +178,9 @@ export interface Overlay {
   count: number;
 }
 
+/** Monotonic id of the latest level request; see `setZoom`. */
+let zoomRequest = 0;
+
 export const useGraphStore = create<GraphState>((set, get) => ({
   phase: "idle",
   error: null,
@@ -232,10 +235,15 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   setZoom: async (zoom: number) => {
     const { snapshotId } = get();
     if (snapshotId === null) return false;
+    // Press 3 then 2 quickly and both fetches go out; without this, whichever
+    // answered *last* won, so the level on screen could be the one pressed
+    // first. Only the most recent request is allowed to land.
+    const request = ++zoomRequest;
     let spec: ViewSpec;
     try {
       spec = await fetchViewSpec(snapshotId, zoom);
     } catch (failure) {
+      if (request !== zoomRequest) return false; // superseded: say nothing
       // Nothing has changed yet — `zoom` is only committed below, on success —
       // so the level buttons still show where the reader actually is. All that
       // is missing is saying so.
@@ -244,6 +252,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       });
       return false;
     }
+    if (request !== zoomRequest) return false; // a later press has taken over
     set({
       notice: null,
       zoom,
@@ -409,11 +418,15 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     if (!drawable(spec, hit) && zoom !== target) {
       // Selecting into a level that failed to load would light nothing and
       // say nothing. `setZoom` has already explained itself; stop here.
+      // `false` also covers being overtaken: if the reader dived or pressed
+      // a level key while this was in flight, that later request owns the
+      // screen and this landing stands down rather than completing on top.
       if (!(await get().setZoom(target))) return;
     }
     // The graph foregrounds one answer at a time; landing a search on a node
-    // an overlay has dimmed is arriving in the dark.
-    set({ paletteOpen: false, overlay: null, overlayError: null });
+    // an overlay has dimmed is arriving in the dark. And arriving anywhere
+    // clears the last thing that did not work.
+    set({ paletteOpen: false, overlay: null, overlayError: null, notice: null });
     get().select(hit.id);
   },
 

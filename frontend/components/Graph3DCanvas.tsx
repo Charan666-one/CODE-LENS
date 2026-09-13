@@ -104,7 +104,12 @@ interface Screen {
 
 export default function Graph3DCanvas() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const graphRef = useRef<Graph>(new Graph({ multi: true, type: "directed" }));
+  // Lazily, because `useRef(new Graph())` would build and discard a graph on
+  // every render — and the reveal re-renders this component every 90ms.
+  const graphRef = useRef<Graph | null>(null);
+  if (graphRef.current === null) {
+    graphRef.current = new Graph({ multi: true, type: "directed" });
+  }
 
   const rendererRef = useRef<WebGLRenderer | null>(null);
   const labelRendererRef = useRef<CSS2DRenderer | null>(null);
@@ -120,6 +125,12 @@ export default function Graph3DCanvas() {
   const orderRef = useRef<string[]>([]);
   const edgeOrderRef = useRef<{ key: string; source: string; target: string }[]>([]);
   const screenRef = useRef<Map<string, Screen>>(new Map());
+  /** The radius each node is *currently drawn at*, in pixels — the base size
+   *  plus whatever the choreography added. Hit-testing against the base
+   *  alone left the outer band of a selected hub unclickable: it is drawn up
+   *  to 9px wider than its attribute says, and a click inside the white disc
+   *  but outside the attribute's radius deselected it. */
+  const drawnRadiusRef = useRef<Map<string, number>>(new Map());
 
   const tweenRef = useRef<number | null>(null);
   const cameraTweenRef = useRef<number | null>(null);
@@ -235,7 +246,7 @@ export default function Graph3DCanvas() {
     function projectAll() {
       const width = container!.clientWidth;
       const height = container!.clientHeight;
-      const graph = graphRef.current;
+      const graph = graphRef.current!;
       const screens = screenRef.current;
       screens.clear();
       const position = new Vector3();
@@ -249,7 +260,7 @@ export default function Graph3DCanvas() {
           x: ((position.x + 1) / 2) * width,
           y: ((1 - position.y) / 2) * height,
           depth: distance,
-          size: (data.size as number) ?? 1,
+          size: drawnRadiusRef.current.get(id) ?? ((data.size as number) || 1),
         });
       });
     }
@@ -291,7 +302,7 @@ export default function Graph3DCanvas() {
     const camera = cameraRef.current;
     if (!spec || !scene || !camera || !ready) return;
 
-    const graph = graphRef.current;
+    const graph = graphRef.current!;
     const from = new Map<string, Placement>();
     const to = new Map<string, Placement>();
     let survivors = 0;
@@ -414,7 +425,7 @@ export default function Graph3DCanvas() {
   // ── the choreography: what everything looks like right now ──────────────
   useEffect(() => {
     if (!ready) return;
-    const graph = graphRef.current;
+    const graph = graphRef.current!;
 
     const paint = () => {
       const frame = buildFrame(graph, {
@@ -453,7 +464,7 @@ export default function Graph3DCanvas() {
   // ── the camera follows the selection ────────────────────────────────────
   useEffect(() => {
     if (!ready || phase !== "exploring") return;
-    const anchor = anchorFor(graphRef.current, selectedId, selectedPath);
+    const anchor = anchorFor(graphRef.current!, selectedId, selectedPath);
     if (!anchor) return;
     // Wait for the level change to stop moving things, or the camera flies to
     // where the node used to be.
@@ -589,7 +600,7 @@ export default function Graph3DCanvas() {
 
       const heading = ARROW_HEADINGS[event.key];
       if (!heading) return;
-      const graph = graphRef.current;
+      const graph = graphRef.current!;
       const from = anchorFor(graph, state.selectedId, selectedPath);
       if (!from) return;
       // The 45° cone means what it meant in 2D — "to the right on screen" —
@@ -619,7 +630,7 @@ export default function Graph3DCanvas() {
     const scene = sceneRef.current;
     const container = containerRef.current;
     if (!scene || !container) return;
-    const graph = graphRef.current;
+    const graph = graphRef.current!;
 
     disposeMesh(nodeMeshRef.current);
     disposeMesh(edgeMeshRef.current);
@@ -770,7 +781,7 @@ export default function Graph3DCanvas() {
   function paintNodes(frame: ReturnType<typeof buildFrame>) {
     const mesh = nodeMeshRef.current;
     if (!mesh) return;
-    const graph = graphRef.current;
+    const graph = graphRef.current!;
     const geometry = mesh.geometry as InstancedBufferGeometry;
     const centers = geometry.getAttribute("aCenter") as InstancedBufferAttribute;
     const sizes = geometry.getAttribute("aSize") as InstancedBufferAttribute;
@@ -785,10 +796,11 @@ export default function Graph3DCanvas() {
       centers.setXYZ(index, world.x, world.y, world.z);
 
       const hovered = hoveredRef.current === id;
-      const radius = display.size ?? (data.size as number);
+      const radius = (display.size ?? (data.size as number)) * (hovered ? 1.15 : 1);
       // A node's diameter is what the shader draws, in pixels — Sigma's
       // `size` is a radius, so the two views agree by construction.
-      sizes.setX(index, display.hidden ? 0 : radius * 2 * (hovered ? 1.15 : 1));
+      sizes.setX(index, display.hidden ? 0 : radius * 2);
+      drawnRadiusRef.current.set(id, display.hidden ? 0 : radius);
 
       const [r, g, b, a] = parseColor(display.color ?? (data.color as string));
       colors.setXYZW(index, r, g, b, display.hidden ? 0 : a);
@@ -803,7 +815,7 @@ export default function Graph3DCanvas() {
   function paintEdges(frame: ReturnType<typeof buildFrame>) {
     const mesh = edgeMeshRef.current;
     if (!mesh) return;
-    const graph = graphRef.current;
+    const graph = graphRef.current!;
     const geometry = mesh.geometry as InstancedBufferGeometry;
     const starts = geometry.getAttribute("aStart") as InstancedBufferAttribute;
     const ends = geometry.getAttribute("aEnd") as InstancedBufferAttribute;
@@ -841,7 +853,7 @@ export default function Graph3DCanvas() {
   function paintLabels(frame: ReturnType<typeof buildFrame>) {
     const labels = labelsRef.current;
     if (labels.length === 0) return;
-    const graph = graphRef.current;
+    const graph = graphRef.current!;
 
     const candidates: { id: string; label: string; forced: boolean; size: number }[] = [];
     graph.forEachNode((id, data) => {
@@ -887,6 +899,7 @@ export default function Graph3DCanvas() {
     let best: string | null = null;
     let bestDepth = Infinity;
     for (const [id, screen] of screenRef.current) {
+      if (screen.size <= 0) continue; // hidden: nothing there to click
       const radius = Math.max(screen.size, 5); // small nodes still need a target
       if (Math.hypot(screen.x - x, screen.y - y) > radius) continue;
       if (screen.depth < bestDepth) {
@@ -900,7 +913,7 @@ export default function Graph3DCanvas() {
   /** Move to a node — closing in, never pulling out. The flat renderer's
    *  `ratio: Math.min(camera.ratio, 0.55)`, said in world units. */
   function flyTo(id: string) {
-    const graph = graphRef.current;
+    const graph = graphRef.current!;
     if (!graph.hasNode(id)) return;
     const world = worldOf(graph.getNodeAttributes(id) as unknown as Placement);
     frameOn(

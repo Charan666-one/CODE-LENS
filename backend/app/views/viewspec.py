@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 from collections import deque
 
+import networkx as nx
 from pydantic import BaseModel, Field
 
 from app.graph.schema import CallConfidence, EdgeKind, KnowledgeGraph, Node, NodeKind
@@ -615,24 +616,62 @@ def _depth_layers(view: GraphView, files: list[Node]) -> dict[str, int]:
 
     # Longest-path layering, by Kahn's algorithm: a file's layer is settled
     # only once every file that imports it has been placed.
+    # `layer` holds provisional values while a node still has importers to
+    # hear from; `settled` is the set whose value is final. The distinction
+    # matters below: a cycle member that one outside file has already reached
+    # has a number in `layer`, and treating that number as placed is how the
+    # loop's two halves ended up on different layers.
     layer: dict[str, int] = {}
+    settled: set[str] = set()
     remaining = {file_id: len(incoming[file_id]) for file_id in file_ids}
     queue: deque[str] = deque(sorted(f for f in file_ids if remaining[f] == 0))
     for file_id in queue:
         layer[file_id] = 0
+        settled.add(file_id)
     while queue:
         current = queue.popleft()
         for nxt in sorted(outgoing[current]):
             layer[nxt] = max(layer.get(nxt, 0), layer[current] + 1)
             remaining[nxt] -= 1
             if remaining[nxt] == 0:
+                settled.add(nxt)
                 queue.append(nxt)
 
-    # Whatever is left is inside a cycle: it never reaches zero predecessors.
-    # Deterministic, and in id order so the answer never depends on hashing.
-    for file_id in sorted(f for f in file_ids if f not in layer):
-        placed = [layer[source] for source in incoming[file_id] if source in layer]
-        layer[file_id] = (max(placed) + 1) if placed else 0
+    # Whatever is left never reached zero predecessors: it is inside an import
+    # cycle, or it sits downstream of one. A cycle has no layering — that is
+    # what a cycle *is* — so its members share one layer, one below the
+    # deepest thing *outside* the loop that reaches them.
+    #
+    # Two ways to get this wrong, both tried. A single sorted pass placed a
+    # member before the partner that imports it, saw no placed importer, and
+    # put it on the surface: `core -> z <-> y` drew `y` next to the entry
+    # points with the z -> y import pointing upward, and renaming the files
+    # flipped the answer. Relaxing to a fixed point instead never settles,
+    # because each member of a loop keeps lifting the other. Collapsing each
+    # strongly-connected component to one node makes the leftovers a DAG
+    # again, and walking that in topological order is order-independent.
+    leftover = sorted(f for f in file_ids if f not in settled)
+    if leftover:
+        unresolved = set(leftover)
+        rest = nx.DiGraph()
+        rest.add_nodes_from(leftover)
+        for file_id in leftover:
+            for source in sorted(incoming[file_id]):
+                if source in unresolved:
+                    rest.add_edge(source, file_id)
+        condensed = nx.condensation(rest)
+        for component in nx.topological_sort(condensed):
+            members: set[str] = condensed.nodes[component]["members"]
+            outside = [
+                layer[source]
+                for member in members
+                for source in incoming[member]
+                if source in settled and source not in members
+            ]
+            level = (max(outside) + 1) if outside else 0
+            for member in members:
+                layer[member] = level
+                settled.add(member)
     return layer
 
 
