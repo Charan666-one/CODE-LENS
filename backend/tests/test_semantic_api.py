@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 import app.api.admission as admission
 import app.api.routes as routes
 import app.api.semantic_routes as semantic
+from app.core import jobs
 from app.core.config import settings
 from app.core.graph_cache import cache as graph_cache
 from app.graph.store import SQLiteGraphStore
@@ -44,6 +45,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     admission.reset()
     with TestClient(app) as test_client:
         yield test_client
+    jobs.registry.drain()  # never close a store under a running job
     store.close()
 
 

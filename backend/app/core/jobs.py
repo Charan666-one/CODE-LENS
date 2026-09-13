@@ -20,6 +20,7 @@ hidden.
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -57,6 +58,11 @@ class JobRegistry:
         self._max_finished = max_finished
         self._store = store
         self._lock = threading.Lock()
+        #: Every runner thread still alive, so something can wait for them.
+        #: Without this a job is fire-and-forget by construction, and a test
+        #: that closed its SQLite store while a runner was mid-query on the
+        #: same connection took the whole interpreter down with a segfault.
+        self._threads: set[threading.Thread] = set()
 
     def attach(self, store: JobStore) -> None:
         """Give the registry somewhere durable to write.
@@ -146,6 +152,28 @@ class JobRegistry:
         """
         with self._lock:
             self._jobs.clear()
+
+    def drain(self, timeout: float = 30.0) -> bool:
+        """Wait for every background runner to finish. Returns whether it did.
+
+        For tests, and for the same reason `reset` exists: a fixture that
+        closes its store must not do so under a runner that is still using
+        it. sqlite3 connections are not thread-safe against being closed
+        mid-query, and the failure is not an exception but a segmentation
+        fault in the C module — the test process simply dies, on whichever
+        machine happens to schedule the teardown a few milliseconds early.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._lock:
+                live = [thread for thread in self._threads if thread.is_alive()]
+                self._threads = set(live)
+            if not live:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            live[0].join(min(remaining, 0.5))
 
     def get(self, job_id: str) -> Job | None:
         """The job, from memory or from the database.
@@ -237,6 +265,8 @@ class JobRegistry:
             finally:
                 if timer is not None:
                     timer.cancel()
+                with self._lock:
+                    self._threads.discard(threading.current_thread())
 
         def _expire() -> None:
             job = self.get(job_id)
@@ -253,7 +283,10 @@ class JobRegistry:
             if on_timeout is not None:
                 on_timeout()
 
-        threading.Thread(target=_runner, daemon=True).start()
+        thread = threading.Thread(target=_runner, daemon=True)
+        with self._lock:
+            self._threads.add(thread)
+        thread.start()
 
 
 registry = JobRegistry(max_finished=settings.MAX_FINISHED_JOBS)

@@ -46,6 +46,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     # tests would silently pass through rather than test anything.
     with TestClient(app, client=("203.0.113.5", 44444)) as test_client:
         yield test_client
+    jobs.registry.drain()  # never close a store under a running job
     store.close()
 
 

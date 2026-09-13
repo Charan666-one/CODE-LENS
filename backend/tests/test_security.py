@@ -52,6 +52,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     admission.reset()
     with TestClient(app) as test_client:
         yield test_client
+    jobs.registry.drain()  # never close a store under a running job
     store.close()
 
 
