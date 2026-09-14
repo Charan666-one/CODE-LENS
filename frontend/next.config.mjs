@@ -3,7 +3,7 @@
 // browser only ever talks to this origin, so the backend needs no public
 // hostname, no CORS grant, and no exposed port. Under compose the value is a
 // service name (`http://backend:8000`); on a host it is localhost.
-const API_ORIGIN = process.env.CODELENS_API_URL ?? "http://127.0.0.1:8000";
+
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -25,13 +25,13 @@ const nextConfig = {
   // The frontend renders; the backend computes. Everything under /api is the
   // FastAPI process — one origin for the browser, no CORS dance anywhere.
   async rewrites() {
-    return [
-      {
-        source: "/api/:path*",
-        destination: `${API_ORIGIN}/api/:path*`,
-      },
-    ];
-  },
+  return [
+    {
+      source: "/api/:path*",
+      destination: `${process.env.BACKEND_URL || "http://127.0.0.1:8000"}/api/:path*`,
+    },
+  ];
+},
   // Security headers. The frontend is the only public origin, so this is the
   // one place they can be set for the whole surface.
   //
@@ -59,23 +59,23 @@ const nextConfig = {
       "object-src 'none'",
       "base-uri 'self'",
       "form-action 'self'",
-      "frame-ancestors 'none'",
+      "frame-ancestors 'none'",  
     ].join("; ");
     return [
+  {
+    source: "/:path*",
+    headers: [
+      { key: "Content-Security-Policy", value: csp },
+      { key: "X-Content-Type-Options", value: "nosniff" },
+      { key: "X-Frame-Options", value: "DENY" },
+      { key: "Referrer-Policy", value: "no-referrer" },
       {
-        source: "/:path*",
-        headers: [
-          { key: "Content-Security-Policy", value: csp },
-          { key: "X-Content-Type-Options", value: "nosniff" },
-          { key: "X-Frame-Options", value: "DENY" },
-          { key: "Referrer-Policy", value: "no-referrer" },
-          {
-            key: "Permissions-Policy",
-            value: "camera=(), microphone=(), geolocation=(), interest-cohort=()",
-          },
-        ],
+        key: "Permissions-Policy",
+        value: "camera=(), microphone=(), geolocation=(), interest-cohort=()",
       },
-    ];
+    ],
+  },
+];
   },
   experimental: {
     // Next's rewrite proxy aborts an unfinished request at 30s
