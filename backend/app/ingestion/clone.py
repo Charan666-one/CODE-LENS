@@ -11,10 +11,16 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from app.ingestion.errors import CloneFailedError, CloneTimeoutError, InvalidSourceError
+from app.ingestion.errors import (
+    CloneFailedError,
+    CloneTimeoutError,
+    InvalidSourceError,
+    RepoTooLargeError,
+)
 
 #: Hosts CodeLens will clone from. Deliberately tiny; widened by checkpoint.
 ALLOWED_HOSTS: frozenset[str] = frozenset({"github.com", "www.github.com"})
@@ -75,10 +81,37 @@ def normalize_repo_url(url: str) -> str:
 HISTORY_DEPTH = 400
 
 
-def shallow_clone(url: str, dest: Path, timeout_seconds: int) -> Path:
+#: How often the size watchdog looks at the growing clone. Two seconds is
+#: cheap (one directory walk) and fine-grained enough that the overshoot past
+#: the ceiling is bounded by bandwidth × 2s rather than by the whole repo.
+_SIZE_POLL_SECONDS = 2.0
+
+
+def shallow_clone(
+    url: str,
+    dest: Path,
+    timeout_seconds: int,
+    *,
+    max_size_mb: int | None = None,
+) -> Path:
     """Clone `url` into `dest` with bounded, blobless history.
 
-    Raises on timeout or git failure.
+    Raises on timeout, on git failure, or when the tree grows past
+    `max_size_mb` **while it is being fetched**.
+
+    ## Why the size check cannot live downstream
+
+    `MAX_REPO_SIZE_MB` used to be enforced only in `snapshot_directory`, after
+    this function returned — which meant a 50 GB repository was fully
+    downloaded to disk and *then* refused. The limit protected the parser and
+    advertised itself as protecting the disk, and the disk is what fills. The
+    only thing actually bounding a clone was the timeout, so the real ceiling
+    was "whatever fits in 300 seconds of bandwidth", which on a fast host is
+    tens of gigabytes.
+
+    So the size is watched as the clone runs and git is killed the moment the
+    tree crosses the line. Overshoot is bounded by one poll interval rather
+    than by the size of the repository, and the partial tree is removed.
     """
     canonical = normalize_repo_url(url)
     dest = dest.resolve()
@@ -108,28 +141,79 @@ def shallow_clone(url: str, dest: Path, timeout_seconds: int) -> Path:
         "GCM_INTERACTIVE": "never",
     }
 
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            env=env,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        shutil.rmtree(dest, ignore_errors=True)
-        raise CloneTimeoutError(
-            f"Clone of {canonical} exceeded {timeout_seconds}s and was aborted."
-        ) from exc
+    process = subprocess.Popen(  # noqa: S603 - fixed argv, validated URL, no shell
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    deadline = time.monotonic() + timeout_seconds
+    oversize = False
 
-    if result.returncode != 0:
+    while True:
+        try:
+            process.wait(timeout=_SIZE_POLL_SECONDS)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        if time.monotonic() >= deadline:
+            _kill(process)
+            shutil.rmtree(dest, ignore_errors=True)
+            raise CloneTimeoutError(
+                f"Clone of {canonical} exceeded {timeout_seconds}s and was aborted."
+            )
+        if max_size_mb is not None and _tree_size_mb(dest) > max_size_mb:
+            oversize = True
+            _kill(process)
+            break
+
+    stderr = process.stderr.read() if process.stderr else ""
+    if process.stdout:
+        process.stdout.close()
+    if process.stderr:
+        process.stderr.close()
+
+    if oversize:
         shutil.rmtree(dest, ignore_errors=True)
-        stderr_lines = (result.stderr or "").strip().splitlines()
+        raise RepoTooLargeError(
+            f"{canonical} exceeded the {max_size_mb} MB limit while cloning; aborted."
+        )
+
+    if process.returncode != 0:
+        shutil.rmtree(dest, ignore_errors=True)
+        stderr_lines = (stderr or "").strip().splitlines()
         detail = stderr_lines[-1] if stderr_lines else "unknown error"
         raise CloneFailedError(f"git clone failed for {canonical}: {detail}")
 
     return dest
+
+
+def _kill(process: subprocess.Popen[str]) -> None:
+    """Stop git, politely then not. A `terminate` that git ignores while it is
+    mid-write would leave the very download this is trying to stop running."""
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _tree_size_mb(root: Path) -> float:
+    """Bytes under `root`, in MB. Errors read as zero: this runs against a
+    directory git is actively writing, so files vanish and appear mid-walk and
+    a transient `OSError` must not abort a clone that is doing nothing wrong."""
+    if not root.exists():
+        return 0.0
+    total = 0
+    for path in root.rglob("*"):
+        try:
+            if path.is_file() and not path.is_symlink():
+                total += path.stat().st_size
+        except OSError:
+            continue
+    return total / (1024 * 1024)
 
 
 def read_git_metadata(root: Path) -> tuple[str, str | None]:

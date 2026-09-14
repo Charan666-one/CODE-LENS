@@ -3,6 +3,15 @@
 import Graph from "graphology";
 import { useEffect, useRef, useState } from "react";
 import Sigma from "sigma";
+import {
+  ARROW_HEADINGS,
+  TRANSITION_MS,
+  anchorFor,
+  buildFrame,
+  easeInOutCubic,
+  neighbourToward,
+} from "@/lib/choreography";
+import { useChoreographyClocks } from "@/lib/clocks";
 import { useGraphStore } from "@/lib/store";
 
 /** The renderer — and only the renderer (ARCHITECTURE.md §6).
@@ -19,6 +28,14 @@ import { useGraphStore } from "@/lib/store";
  *  identity and glide to their new position, arrivals fade in, departures
  *  fade out. Same data, same ViewSpec contract; the continuity is what makes
  *  it read as one world seen at three depths.
+ *
+ *  **What to draw is no longer decided here.** The reveal, the ripple, the
+ *  overlay and the relevance hierarchy moved to `lib/choreography.ts` when a
+ *  second renderer appeared, because they were never Sigma-specific: they are
+ *  pure functions from the store's state to a display record. What is left in
+ *  this file is Sigma — the instance, the diff, the camera, the events — and
+ *  two reducers that hand a node its own attributes and pass the answer
+ *  through.
  */
 
 /** A camera bounding box that frames the bulk of the graph, not its outliers.
@@ -47,60 +64,6 @@ function massBBox(
   return { x: [cx - half, cx + half], y: [cy - half, cy + half] };
 }
 
-/** Impact color for the ripple: hot amber at distance 1, fading toward the
- *  wavefront so a dependent three hops away visibly matters less than a direct
- *  one. Fades via alpha over the dark canvas — the falloff IS the severity. */
-function rippleColor(distance: number, front: number): string {
-  const span = Math.max(1, front);
-  const t = Math.min(1, (distance - 1) / span); // 0 nearest, 1 at the wavefront
-  const alpha = 1 - 0.7 * t;
-  const green = Math.round(160 - 60 * t);
-  return `rgba(249, ${green}, 40, ${alpha.toFixed(2)})`;
-}
-
-/** How long a level change takes to resolve. Long enough to read as travel,
- *  short enough that nobody waits for it. */
-const TRANSITION_MS = 620;
-
-/** Two dimensions, two channels — **alpha carries relevance, hue carries
- *  confidence.**
- *
- *  The intent was dashed / dotted lines for the confidence ladder, which is
- *  the clearer encoding. Sigma 3.0.3 ships no dash support and no built-in
- *  edge program that accepts one, so a `dashed` attribute would have been
- *  silently dropped: code that looks like it renders the ladder while
- *  rendering nothing. Writing a custom WebGL edge program is the real fix and
- *  is worth doing later.
- *
- *  Until then the ladder rides a single hue ramp — neutral for proven,
- *  increasingly amber for unproven — so "amber-ness is doubt". It reuses the
- *  palette's existing warning colour rather than inventing a meaning, stays
- *  legible at 5% alpha, and leaves alpha entirely to the hierarchy. Width
- *  reinforces it: a guess is drawn thinner than a proof. */
-/// The tints are perceptually matched to the slate, not to the palette's
-/// warning amber. First attempt used `#fbbf24` directly and the canvas turned
-/// gold: only 38% of Flask's edges are uncertain, but saturated amber at the
-/// same alpha reads several times louder than low-chroma slate, so a minority
-/// looked like an emergency. Same lightness, hue shifted — the uncertainty is
-/// legible without shouting.
-const CONFIDENCE_RGB: Record<string, string> = {
-  resolved: "148,163,184", // slate — a proven edge needs no colour
-  heuristic: "186,168,148", // warm grey — a name match, not a proof
-  dynamic_unknown: "205,162,124", // warmer — the target could be any of several
-};
-
-const CONFIDENCE_WIDTH: Record<string, number> = {
-  resolved: 1,
-  heuristic: 0.75,
-  dynamic_unknown: 0.55,
-};
-
-const edgeColor = (confidence: string, alpha: number): string =>
-  `rgba(${CONFIDENCE_RGB[confidence] ?? CONFIDENCE_RGB.resolved},${alpha})`;
-
-const easeInOutCubic = (t: number): number =>
-  t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-
 interface Placement {
   x: number;
   y: number;
@@ -111,22 +74,34 @@ export default function GraphCanvas() {
   const containerRef = useRef<HTMLDivElement>(null);
   const sigmaRef = useRef<Sigma | null>(null);
   const frameRef = useRef<number | null>(null);
+  //: When the level-change tween finishes moving nodes. Anything that reads a
+  //: node's *drawn* position has to wait for it: during the tween a node is
+  //: still sitting at the previous level's coordinates.
+  const settledAtRef = useRef(0);
+  //: The node the current ripple has already been framed on, so the camera
+  //: moves once per wave rather than once per expanding ring.
+  const framedRippleRef = useRef<string | null>(null);
   /// Flips once Sigma exists, so the diff effect below re-runs for a spec
   /// that arrived while the container was still being laid out.
   const [ready, setReady] = useState(false);
+
+  useChoreographyClocks();
 
   const spec = useGraphStore((s) => s.spec);
   const phase = useGraphStore((s) => s.phase);
   const revealIndex = useGraphStore((s) => s.revealIndex);
   const selectedId = useGraphStore((s) => s.selectedId);
+  // Only for `anchorFor`: the owning file of a selection this level cannot
+  // draw. It arrives a moment after the selection does, which is why every
+  // effect that anchors also depends on it.
+  const selectedPath = useGraphStore((s) => s.explanation?.meta.identity.file_path);
   const select = useGraphStore((s) => s.select);
-  const advanceReveal = useGraphStore((s) => s.advanceReveal);
   const skipReveal = useGraphStore((s) => s.skipReveal);
   const blast = useGraphStore((s) => s.blast);
   const rippleFor = useGraphStore((s) => s.rippleFor);
   const rippleFront = useGraphStore((s) => s.rippleFront);
-  const advanceRipple = useGraphStore((s) => s.advanceRipple);
   const clearRipple = useGraphStore((s) => s.clearRipple);
+  const setZoom = useGraphStore((s) => s.setZoom);
   const overlay = useGraphStore((s) => s.overlay);
   const clearOverlay = useGraphStore((s) => s.clearOverlay);
 
@@ -271,6 +246,7 @@ export default function GraphCanvas() {
     // entrance.
     if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
     const started = performance.now();
+    settledAtRef.current = started + TRANSITION_MS;
     const step = () => {
       const t = Math.min(1, (performance.now() - started) / TRANSITION_MS);
       const eased = easeInOutCubic(t);
@@ -321,8 +297,14 @@ export default function GraphCanvas() {
     // from the current bounding box, so writing the coordinates by hand
     // framed the *previous* level's extent and left L1 rendering a blank
     // canvas while L2 looked fine. Sigma knows where home is; ask it.
+    // Never zero: sigma divides the elapsed time by the duration, so a
+    // duration of 0 makes the first frame's `t` NaN and writes NaN into the
+    // camera's x, y and ratio — after which every later camera move
+    // interpolates from NaN and the canvas renders nothing. It cost a blank
+    // screen on exactly the transitions with no shared nodes: L1 → L3, which
+    // is what a search for a symbol from the architecture level does.
     sigma.getCamera().animatedReset({
-      duration: survivors.length > 0 ? TRANSITION_MS : 0,
+      duration: survivors.length > 0 ? TRANSITION_MS : 1,
     });
   }, [spec, ready]);
 
@@ -343,243 +325,164 @@ export default function GraphCanvas() {
     // installed — L1 rendered blank while L2 looked fine. Releasing a
     // selection now leaves the view exactly where it is; the level buttons
     // and a dive are what move the camera.
-    if (!selectedId || !sigma.getGraph().hasNode(selectedId)) return;
-    const position = sigma.getNodeDisplayData(selectedId);
-    if (!position) return;
-    camera.animate(
-      // Never zoom *out* to reach something: if the reader has already pushed
-      // in closer than this, honour that and only re-centre.
-      { x: position.x, y: position.y, ratio: Math.min(camera.ratio, 0.55) },
-      { duration: 420 },
-    );
-  }, [selectedId, phase]);
+    const anchor = anchorFor(sigma.getGraph(), selectedId, selectedPath);
+    if (!anchor) return;
+
+    // Search can select at the same moment the level changes — "take me to
+    // this function" from L1 arrives at L3 with the node still mid-tween,
+    // holding the position it had at the *previous* level. Flying there put
+    // the camera in empty space and the graph off screen. Wait for the nodes
+    // to stop moving; then the coordinate is the one being drawn.
+    const move = () => {
+      const position = sigma.getNodeDisplayData(anchor);
+      if (!position) return;
+      camera.animate(
+        // Never zoom *out* to reach something: if the reader has already
+        // pushed in closer than this, honour that and only re-centre. A
+        // non-finite ratio would poison this and every camera move after it,
+        // so it is treated as "no preference to honour".
+        {
+          x: position.x,
+          y: position.y,
+          ratio: Number.isFinite(camera.ratio) ? Math.min(camera.ratio, 0.55) : 0.55,
+        },
+        { duration: 420 },
+      );
+    };
+    const wait = settledAtRef.current - performance.now();
+    if (wait <= 0) {
+      move();
+      return;
+    }
+    const timer = window.setTimeout(move, wait);
+    return () => window.clearTimeout(timer);
+  }, [selectedId, selectedPath, phase]);
 
   // The reveal, the ripple, and the relevance hierarchy are all reducers over
   // precomputed state — the renderer decides nothing, it only choreographs.
+  // The deciding moved to `lib/choreography.ts`; what is left here is handing
+  // Sigma the answers.
   useEffect(() => {
     const sigma = sigmaRef.current;
     if (!sigma) return;
     const graph = sigma.getGraph();
 
-    // Ripple: distance-per-node from the real blast-radius result, kept only
-    // for nodes that exist at this zoom level (the wave lights what's on screen).
-    const distanceOf = new Map<string, number>();
-    if (rippleFor && blast) {
-      for (const entry of blast.ranked) {
-        if (graph.hasNode(entry.node_id)) {
-          distanceOf.set(entry.node_id, entry.reasons.distance);
-          continue;
-        }
-        // The affected node is not drawn at this level — asking about a
-        // function while looking at files is the common case, and it used to
-        // light nothing at all: real counters over a dead canvas, which is
-        // exactly the disagreement between caption and picture this feature
-        // exists to avoid. Fall back to the file that contains it, keeping
-        // the nearest distance when several of its symbols are hit.
-        const path = entry.reasons.file_path;
-        if (!path) continue;
-        const owner = `file:${path}`;
-        if (!graph.hasNode(owner)) continue;
-        const existing = distanceOf.get(owner);
-        if (existing === undefined || entry.reasons.distance < existing) {
-          distanceOf.set(owner, entry.reasons.distance);
-        }
-      }
-    }
-    // The node the wave radiates from, as drawn at *this* level. Asking about
-    // a function while looking at files is the common case, so the source
-    // falls back to the file that holds it — otherwise the whole ripple was
-    // skipped and the readout described a wave nobody could see.
-    let rippleSource: string | null = null;
-    if (rippleFor && graph.hasNode(rippleFor)) {
-      rippleSource = rippleFor;
-    } else if (rippleFor && blast) {
-      const focusPath = blast.meta.focus?.file_path;
-      if (focusPath && graph.hasNode(`file:${focusPath}`)) {
-        rippleSource = `file:${focusPath}`;
-      }
-    }
-    const rippleActive = rippleFor !== null && (rippleSource !== null || distanceOf.size > 0);
-
-    // A query's answer, drawn on the graph. Node ids come from the graph, but
-    // a cluster at L1 is a view-layer invention, so `explainId` is checked too
-    // — otherwise an answer about files would light nothing at district level.
-    const answered = new Set<string>();
-    if (overlay && !rippleActive) {
-      const wanted = new Set(overlay.nodeIds);
-      graph.forEachNode((id, data) => {
-        if (wanted.has(id) || wanted.has(data.explainId as string)) answered.add(id);
-      });
-    }
-    const overlayActive = answered.size > 0;
-
-    // The relevance hierarchy: direct neighbours, then everything one hop
-    // further out. Second degree is what turns a selection from a star into a
-    // readable neighbourhood — it shows the shape of what the change touches.
-    const direct = new Set<string>();
-    const second = new Set<string>();
-    if (!rippleActive && selectedId && graph.hasNode(selectedId)) {
-      for (const neighbour of graph.neighbors(selectedId)) direct.add(neighbour);
-      for (const neighbour of direct) {
-        for (const outer of graph.neighbors(neighbour)) {
-          if (outer !== selectedId && !direct.has(outer)) second.add(outer);
-        }
-      }
-    }
-
-    sigma.setSetting("nodeReducer", (node, data) => {
-      const assemblyIndex = data.assemblyIndex as number;
-      if (phase === "revealing" && assemblyIndex > revealIndex) {
-        return { ...data, hidden: true };
-      }
-
-      if (rippleActive) {
-        if (node === rippleSource) {
-          // The source of the change: the eye of the storm.
-          return { ...data, color: "#f8fafc", size: (data.size as number) * 1.6, zIndex: 3 };
-        }
-        const distance = distanceOf.get(node);
-        if (distance === undefined) {
-          return { ...data, color: "#0f172a", label: null, zIndex: 0 }; // untouched
-        }
-        if (distance > rippleFront) {
-          return { ...data, color: "#1e293b", label: null, zIndex: 1 }; // wave not here yet
-        }
-        // Reached: hot near the source, fading with distance (real severity).
-        return {
-          ...data,
-          color: rippleColor(distance, rippleFront),
-          size: (data.size as number) * (distance === 1 ? 1.4 : 1.1),
-          zIndex: distance === 1 ? 2 : 1,
-        };
-      }
-
-      if (selectedId) {
-        // 100 / 60 / 20 / 5. On a dense graph a slightly dimmer neighbour is
-        // invisible, so the falloff has to be steep enough to read instantly.
-        // Emphasis is added, then capped. A flat multiplier cannot serve both
-        // levels: ×2.2 is the minimum that reads on an L2 file node of 4px,
-        // and turns an L1 district of 40px into a disc that swallows the
-        // screen. Growing by a bounded amount lifts the small case and leaves
-        // the large one recognisable — selection is carried by colour and
-        // label anyway, with size only reinforcing it.
-        const base = data.size as number;
-        if (node === selectedId) {
-          return {
-            ...data,
-            color: "#ffffff",
-            size: base + Math.min(base * 1.2, 9),
-            highlighted: true,
-            forceLabel: true,
-            zIndex: 4,
-          };
-        }
-        if (direct.has(node)) {
-          return {
-            ...data,
-            size: base + Math.min(base * 0.5, 4),
-            forceLabel: true,
-            zIndex: 3,
-          };
-        }
-        if (second.has(node)) {
-          return { ...data, color: "#334155", label: null, zIndex: 2 };
-        }
-        return { ...data, color: "#0d1524", label: null, zIndex: 0 };
-      }
-      return { ...data, zIndex: 1 };
+    const frame = buildFrame(graph, {
+      phase,
+      revealIndex,
+      selectedId,
+      selectedPath,
+      blast,
+      rippleFor,
+      rippleFront,
+      overlay,
     });
 
+    // Frame the wave's origin — but only when nothing else has.
+    //
+    // `anchorFor` usually gets there first, but it waits on the explanation
+    // fetch, and the ripple knows its own origin immediately — `blast.meta`
+    // carries the focus file. Without this the first second of an impact on a
+    // function was the failure the whole feature exists to avoid: the canvas
+    // dimmed, the counters counted, and the file actually lighting up could be
+    // anywhere off screen. Framing the source is what makes the dimming read
+    // as "look here" rather than "something happened".
+    //
+    // Once per ripple, not once per ring: this effect re-runs on every tick of
+    // the wave, and re-animating the camera under an expanding ripple is
+    // motion sickness. `null` when the ripple ends, so the next one frames.
+    if (!frame.rippleActive || frame.rippleSource === null) {
+      framedRippleRef.current = null;
+    } else if (
+      framedRippleRef.current !== frame.rippleSource &&
+      frame.rippleSource !== frame.anchor
+    ) {
+      framedRippleRef.current = frame.rippleSource;
+      const position = sigma.getNodeDisplayData(frame.rippleSource);
+      const camera = sigma.getCamera();
+      if (position) {
+        camera.animate(
+          // Same rule as the selection camera: close in, never pull out.
+          { x: position.x, y: position.y, ratio: Math.min(camera.ratio, 0.55) },
+          { duration: 420 },
+        );
+      }
+    }
+
+    // Sigma's reducers, in full. A display record is a set of overrides on the
+    // node's own attributes, which is exactly what a spread does.
+    sigma.setSetting("nodeReducer", (node, data) => ({
+      ...data,
+      ...frame.node(node, data),
+    }));
     sigma.setSetting("edgeReducer", (edge, data) => {
       const [source, target] = graph.extremities(edge);
-      const confidence = data.confidence as string;
-      // Width is confidence's second channel; relevance never touches it, so
-      // a faint distant edge and a faint guess stay distinguishable.
-      const baseSize =
-        (data.baseSize as number) * (CONFIDENCE_WIDTH[confidence] ?? 1);
-
-      if (phase === "revealing") {
-        const sourceIn =
-          (graph.getNodeAttribute(source, "assemblyIndex") as number) <= revealIndex;
-        const targetIn =
-          (graph.getNodeAttribute(target, "assemblyIndex") as number) <= revealIndex;
-        if (!sourceIn || !targetIn) return { ...data, hidden: true };
-      }
-
-      if (rippleActive) {
-        const sourceReached =
-          source === rippleSource || (distanceOf.get(source) ?? Infinity) <= rippleFront;
-        const targetReached =
-          target === rippleSource || (distanceOf.get(target) ?? Infinity) <= rippleFront;
-        if (!sourceReached || !targetReached) return { ...data, hidden: true };
-        // The wave owns the colour here — impact is the message, not provenance.
-        return { ...data, size: baseSize * 1.4, color: "rgba(251,146,60,0.5)" };
-      }
-
-      if (overlayActive) {
-        // Only the wiring between answered nodes — for `cycles` this is what
-        // turns a set of files into a visible loop.
-        if (!answered.has(source) || !answered.has(target)) {
-          return { ...data, hidden: true };
-        }
-        return { ...data, color: "rgba(125,211,252,0.9)", size: baseSize * 2.2 };
-      }
-
-      if (selectedId) {
-        const touchesSelection = source === selectedId || target === selectedId;
-        const withinDirect =
-          (direct.has(source) || source === selectedId) &&
-          (direct.has(target) || target === selectedId);
-        const touchesSecond = second.has(source) || second.has(target);
-
-        // 100 / 60 / 20 / 5 — the hierarchy, in alpha.
-        if (touchesSelection) {
-          return { ...data, color: edgeColor(confidence, 1), size: baseSize * 2.4 };
-        }
-        if (withinDirect) {
-          return { ...data, color: edgeColor(confidence, 0.6), size: baseSize * 1.2 };
-        }
-        if (touchesSecond) {
-          return { ...data, color: edgeColor(confidence, 0.2), size: baseSize };
-        }
-        return { ...data, color: edgeColor(confidence, 0.05), size: baseSize };
-      }
-
-      // Resting state: quiet, so that selecting anything is a visible event.
-      return { ...data, color: edgeColor(confidence, 0.22), size: baseSize };
+      return { ...data, ...frame.edge(source, target, data) };
     });
 
     sigma.refresh();
-  }, [phase, revealIndex, selectedId, rippleFor, blast, rippleFront, spec, overlay]);
+  }, [phase, revealIndex, selectedId, selectedPath, rippleFor, blast, rippleFront, spec, overlay]);
 
-  // Drive the ripple clock: the wave expands one distance ring at a time.
-  useEffect(() => {
-    if (!rippleFor) return;
-    const timer = window.setInterval(advanceRipple, 320);
-    return () => window.clearInterval(timer);
-  }, [rippleFor, advanceRipple]);
-
-  // Drive the reveal clock.
-  useEffect(() => {
-    if (phase !== "revealing") return;
-    const timer = window.setInterval(advanceReveal, 90);
-    return () => window.clearInterval(timer);
-  }, [phase, advanceReveal]);
-
-  // Escape hatch on keyboard too.
+  // ── the keyboard: the graph without a mouse ─────────────────────────────
+  //
+  // Escape unwinds one layer at a time, 1/2/3 change depth, and the arrows
+  // walk the graph by following edges. Traversal is *spatial* rather than
+  // list order — pressing → goes to the neighbour that is actually to the
+  // right — because the reader is looking at a map, and a key that jumps to
+  // whichever neighbour happens to be first in an adjacency list teaches
+  // nothing about the shape of what they are looking at.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      const state = useGraphStore.getState();
       if (event.key === "Escape") {
-        const state = useGraphStore.getState();
         if (state.phase === "revealing") skipReveal();
         else if (state.rippleFor) clearRipple();
         else if (state.overlay) clearOverlay();
         else select(null);
+        return;
+      }
+
+      // Anything with its own text cursor owns the keystroke. Without this,
+      // typing "3" into ⌘K would silently change the zoom behind the palette.
+      const target = event.target as HTMLElement | null;
+      if (
+        state.paletteOpen ||
+        state.guideOpen ||
+        target?.isContentEditable ||
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement
+      ) {
+        return;
+      }
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+      if (event.key === "1" || event.key === "2" || event.key === "3") {
+        const level = Number(event.key);
+        if (level !== state.zoom) void setZoom(level);
+        return;
+      }
+
+      const heading = ARROW_HEADINGS[event.key];
+      if (!heading) return;
+      const sigma = sigmaRef.current;
+      if (!sigma) return;
+      const graph = sigma.getGraph();
+      const from = anchorFor(graph, state.selectedId, selectedPath);
+      if (!from) return;
+      const next = neighbourToward(
+        graph,
+        (id) => sigma.getNodeDisplayData(id) ?? null,
+        from,
+        heading,
+      );
+      if (next) {
+        event.preventDefault(); // arrows would otherwise scroll the page
+        select(next);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [skipReveal, select, clearRipple, clearOverlay]);
+  }, [skipReveal, select, clearRipple, clearOverlay, setZoom, selectedPath]);
 
   return <div ref={containerRef} className="graph-canvas" />;
 }

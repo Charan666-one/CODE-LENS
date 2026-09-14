@@ -35,3 +35,83 @@ jobs:
       # fires on any graph drift thereafter.
       - name: Tests (pytest)
         run: pytest -q
+
+  audit:
+    name: dependencies (known vulnerabilities)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Audits requirements.txt, NOT the developer's virtualenv. A local venv
+      # accumulates packages that were tried and abandoned — this repo's had
+      # weasyprint, chromadb and aiohttp in it, none of them shipped — and
+      # auditing that reports vulnerabilities in software the image does not
+      # contain while saying nothing about drift in the software it does.
+      - name: Python dependencies (pip-audit)
+        run: |
+          pip install pip-audit
+          pip-audit -r backend/requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # Advisory, not blocking. Next pins its own transitive tree, so a high
+      # finding here is routinely unfixable without a major upgrade, and a
+      # gate nobody can pass is a gate everyone learns to bypass. The output
+      # is read; whether a finding is *reachable* is the judgement call, and
+      # that belongs in review rather than in an exit code.
+      - name: Node dependencies (npm audit)
+        working-directory: frontend
+        run: npm audit --omit=dev || true
+
+  images:
+    name: images (build · boot · analyse)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A Dockerfile nothing builds is a Dockerfile that has already rotted.
+      # Both of the bugs this job would have caught were invisible to the test
+      # suite: an image without `git` starts cleanly and fails on the first
+      # analysis, and the frontend bound to $HOSTNAME served fine through a
+      # published port while its healthcheck could never pass.
+      - name: Build images
+        run: docker compose build
+
+      - name: Boot the stack
+        run: docker compose up -d --wait --wait-timeout 180
+
+      # The real proof: a repository through the whole pipeline, over the same
+      # proxy path a browser uses. `--wait` above already required both
+      # healthchecks to pass before this runs.
+      - name: Analyse a repository end to end
+        run: |
+          job=$(curl -sf -X POST http://localhost:3000/api/analyze \
+            -H 'Content-Type: application/json' \
+            -d '{"source":"https://github.com/pallets/itsdangerous"}' \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin)["job_id"])')
+          for _ in $(seq 1 60); do
+            body=$(curl -sf "http://localhost:3000/api/analyze/$job")
+            state=$(printf '%s' "$body" | python3 -c 'import sys,json; print(json.load(sys.stdin)["status"])')
+            case "$state" in
+              done)  printf '%s\n' "$body"; exit 0 ;;
+              error) printf '%s\n' "$body"; exit 1 ;;
+            esac
+            sleep 3
+          done
+          echo "timed out waiting for analysis"; exit 1
+
+      - name: Server logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

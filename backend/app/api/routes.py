@@ -20,22 +20,27 @@ always, removes the failure mode instead of chasing its symptoms.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.api import admission
 from app.core import jobs
 from app.core.config import settings
 from app.core.graph_cache import cache
-from app.core.pipeline import Stage, run_pipeline
+from app.core.limits import reclaim_clone_cache
+from app.core.pipeline import StageReport, run_pipeline
 from app.graph.store import SQLiteGraphStore
 from app.ingestion import IngestionError, looks_like_remote
 from app.ingestion.clone import normalize_repo_url
 from app.queries import QueryError, registered_queries, run_query
 from app.views.viewspec import compile_viewspec
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["CodeLens"])
 
@@ -74,7 +79,7 @@ class JobStatusResponse(BaseModel):
 
 
 @router.post("/analyze", response_model=AnalyzeAccepted, status_code=202)
-def analyze(request: AnalyzeRequest) -> AnalyzeAccepted:
+def analyze(request: AnalyzeRequest, http_request: Request) -> AnalyzeAccepted:
     """Validate and kick off analysis; return a job id immediately.
 
     Validation (the trust boundary, and a malformed URL) still happens
@@ -95,35 +100,110 @@ def analyze(request: AnalyzeRequest) -> AnalyzeAccepted:
         except IngestionError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    job = jobs.registry.create()
+    # Asking twice for the same repository is one question, not two. Without
+    # this, a double-click starts a second pipeline that races the first over
+    # the same clone directory.
+    already_running = jobs.registry.find_active(str(source))
+    if already_running is not None:
+        return AnalyzeAccepted(job_id=already_running.id, status=already_running.status)
+
+    # Limits apply only past the dedupe check above. Asking twice for a repo
+    # already being analysed is one question, and charging a client's quota
+    # for the same answer twice would penalise exactly the double-click the
+    # dedupe exists to absorb.
+    #
+    # Acquired here, released in the worker's `finally` — the work outlives
+    # this request, so the context-manager form in admission.py cannot be used.
+    release_slot = admission.acquire(http_request)
+
+    job = jobs.registry.create(key=str(source))
 
     def work() -> None:
-        def on_progress(stage: Stage, seconds: float, skipped: bool) -> None:
+        def on_progress(report: StageReport) -> None:
             jobs.registry.append_stage(
-                job.id, {"stage": stage.value, "seconds": round(seconds, 3), "skipped": skipped}
+                job.id,
+                {
+                    "stage": report.stage.value,
+                    "seconds": round(report.seconds, 3),
+                    "skipped": report.skipped,
+                    "detail": report.detail,
+                },
             )
 
-        result = run_pipeline(
-            source,
-            get_store(),
-            max_size_mb=settings.MAX_REPO_SIZE_MB,
-            on_progress=on_progress,
-        )
-        jobs.registry.update(
-            job.id,
-            status="done",
-            result={
-                "snapshot_id": result.snapshot_id,
-                "repo_url": result.graph.snapshot.repo_url,
-                "commit_sha": result.graph.snapshot.commit_sha,
-                "skipped": result.skipped,
-                "nodes": len(result.graph.nodes),
-                "edges": len(result.graph.edges),
-            },
-        )
+        try:
+            result = run_pipeline(
+                source,
+                get_store(),
+                max_size_mb=settings.MAX_REPO_SIZE_MB,
+                on_progress=on_progress,
+            )
+            jobs.registry.update(
+                job.id,
+                status="done",
+                result={
+                    "snapshot_id": result.snapshot_id,
+                    "repo_url": result.graph.snapshot.repo_url,
+                    "commit_sha": result.graph.snapshot.commit_sha,
+                    "skipped": result.skipped,
+                    "nodes": len(result.graph.nodes),
+                    "edges": len(result.graph.edges),
+                },
+            )
+        except IngestionError as exc:
+            # Ingestion errors are written for the person who typed the URL —
+            # "not a valid repository", "exceeded the size limit" — and are
+            # safe and useful to return verbatim.
+            jobs.registry.update(job.id, status="error", error=str(exc))
+        except Exception:
+            # Everything else is an internal failure, and `str(exc)` on one of
+            # those is whatever the raising library felt like saying: a
+            # container path, a SQLite file location, a stack-shaped string.
+            # The client gets a job id to quote; the detail goes to the log,
+            # where the operator can read it and a stranger cannot.
+            logger.exception("analysis job %s failed", job.id)
+            jobs.registry.update(
+                job.id,
+                status="error",
+                error=f"Analysis failed unexpectedly (job {job.id}).",
+            )
+        finally:
+            # The slot must come back on *every* path. `run_in_background`
+            # turns an exception into the job's error rather than a crash, so
+            # a failure here is silent — and a silent leak of the one thing
+            # limiting concurrency ends with a permanently "busy" service
+            # that has nothing running.
+            release_slot()
+            _reclaim_clone_cache()
 
-    jobs.registry.run_in_background(job.id, work)
+    # `release_slot` is idempotent (admission.acquire), so the timeout path
+    # and the worker's own `finally` can both call it without the double
+    # release silently raising the effective concurrency cap.
+    jobs.registry.run_in_background(
+        job.id,
+        work,
+        timeout_seconds=settings.ANALYSIS_TIMEOUT_SECONDS,
+        on_timeout=release_slot,
+    )
     return AnalyzeAccepted(job_id=job.id)
+
+
+def _reclaim_clone_cache() -> None:
+    """Keep the clone directory under its ceiling. Best-effort, never fatal.
+
+    Runs after each analysis rather than on a timer: the cache only grows
+    when an analysis adds to it, so that is exactly when it needs checking,
+    and it keeps the whole mechanism free of a background scheduler.
+    """
+    try:
+        removed = reclaim_clone_cache(
+            settings.CLONE_DIR,
+            settings.MAX_CLONE_CACHE_MB,
+            keep={Path(key).name for key in jobs.registry.active_keys()},
+        )
+        if removed:
+            logger.info("reclaimed %d cached clone(s): %s", len(removed), ", ".join(removed))
+    except OSError as exc:  # a full or read-only volume must not fail the job
+        logger.warning("clone cache reclaim failed: %s", exc)
 
 
 @router.get("/analyze/{job_id}", response_model=JobStatusResponse)
@@ -134,7 +214,10 @@ def analyze_status(job_id: str) -> JobStatusResponse:
     payload: dict[str, Any] = {"job_id": job.id, "status": job.status, "stages": job.stages}
     if job.status == "done" and job.result is not None:
         payload.update(job.result)
-    if job.status == "error":
+    if job.status in ("error", "interrupted"):
+        # `interrupted` carries its explanation too. Without this the status
+        # arrived with a null message and the client fell back to a generic
+        # string, losing the one useful thing the server knew.
         payload["error"] = job.error
     return JobStatusResponse(**payload)
 

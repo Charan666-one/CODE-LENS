@@ -25,7 +25,11 @@ async function expectOk(response: Response): Promise<Response> {
 
 interface JobStatus {
   job_id: string;
-  status: "pending" | "running" | "done" | "error";
+  /** `interrupted` is what a server restart leaves behind. It is separate
+   *  from `error` because nothing went wrong with the analysis — the process
+   *  running it stopped existing — and "try again" is the right advice
+   *  rather than "something failed". */
+  status: "pending" | "running" | "done" | "error" | "interrupted";
   error?: string;
 }
 
@@ -54,6 +58,13 @@ export async function analyzeRepo(source: string): Promise<AnalyzeResponse> {
     const body = (await response.json()) as JobStatus & Partial<AnalyzeResponse>;
     if (body.status === "done") return body as AnalyzeResponse;
     if (body.status === "error") throw new Error(body.error ?? "Analysis failed.");
+    if (body.status === "interrupted") {
+      // Terminal, and it must be handled explicitly: without this branch the
+      // loop polls a job that will never progress, forever.
+      throw new Error(
+        body.error ?? "The server restarted during this analysis. Please try again.",
+      );
+    }
     await new Promise((resolve) => setTimeout(resolve, ANALYZE_POLL_MS));
   }
 }

@@ -1,0 +1,48 @@
+# TLS and the front door. Caddy obtains and renews the certificate itself —
+# there is no certbot step and no cron entry to forget.
+#
+# `CODELENS_PUBLIC_ORIGIN` is read from the environment (docker-compose.prod.yml
+# passes it through) and must be a real hostname whose DNS A record already
+# points at this machine. Let's Encrypt validates by connecting back to it, so
+# DNS has to be correct *before* the first start or issuance fails.
+
+{$CODELENS_PUBLIC_ORIGIN} {
+	# The frontend is the only thing behind this. It proxies /api onward to
+	# the backend over the internal network, so the API needs no public
+	# hostname and no route of its own.
+	reverse_proxy frontend:3000
+
+	# Caddy sets X-Forwarded-For to the real client address, replacing
+	# anything the caller sent. That is what makes the backend's
+	# TRUSTED_PROXY_IPS meaningful: the header is no longer a claim by the
+	# client, it is a statement by this proxy.
+
+	encode zstd gzip
+
+	# NOTE: there is deliberately no `rate_limit` here. Caddy has no such
+	# directive built in — it is the third-party `caddy-ratelimit` plugin,
+	# and a Caddyfile that names it simply fails to start:
+	#
+	#     Error: adapting config: unrecognized directive: rate_limit
+	#
+	# The application's own per-client limits (backend/app/core/limits.py)
+	# are the real ceiling and are tested. If you want a second one at the
+	# edge, build a custom image with xcaddy and add the plugin — do not
+	# paste the directive in and hope.
+
+	# Bodies are capped in the app at 64 KB. Refusing here as well means an
+	# oversized upload never reaches it at all.
+	request_body {
+		max_size 1MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

@@ -266,6 +266,12 @@ def _build_import_map(facts: FileFacts, table: SymbolTable, emit: EmitEdge) -> I
     import_map: ImportMap = {}
 
     for raw in facts.imports:
+        if raw.bare:
+            # Names a package. Binding it would let a repo file that happens
+            # to share the name capture the import — `require('react')`
+            # resolving to a local react.js is a wrong edge, and a wrong edge
+            # costs more than the missing one. Layer B handles these.
+            continue
         # Canonicalise so symbol candidates use the qname the target file
         # really has ('store' -> 'store.index' when store/index.js answered).
         target_module = table.canonical_module(_target_module(raw, facts))

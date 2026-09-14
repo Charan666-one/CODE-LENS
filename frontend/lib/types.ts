@@ -11,6 +11,13 @@ export interface ViewNode {
   color: string;
   cluster: string;
   assembly_index: number;
+  /** The depth axis. `depth` is the fact — the longest chain of imports that
+   *  arrives at this file, so nothing sits above what leans on it — and `z`
+   *  is that fact placed in the same coordinate space as x and y. Optional
+   *  because a spec compiled by an older backend has neither, and a flat
+   *  renderer that ignores both is still correct. */
+  depth?: number;
+  z?: number;
   risk: number;
   fan_in: number;
   is_entrypoint: boolean;
@@ -53,6 +60,10 @@ export interface PipelineStage {
   stage: string;
   seconds: number;
   skipped: boolean;
+  /** What this stage measured, in one phrase — "412 files · Python", "8,254
+   *  nodes". A count taken from the stage's own result, never an estimate of
+   *  work remaining. `null` when a stage had nothing to count. */
+  detail: string | null;
 }
 
 export interface AnalyzeResponse {

@@ -232,8 +232,8 @@ def _module_metrics(view: GraphView) -> list[ModuleMetrics]:
 
     metrics: list[ModuleMetrics] = []
     for module_id, contained in sorted(members.items()):
-        node = view.node(module_id)
-        if node is None:
+        module_node = view.node(module_id)
+        if module_node is None:
             continue
         file_count = sum(
             1
@@ -245,7 +245,7 @@ def _module_metrics(view: GraphView) -> list[ModuleMetrics]:
         metrics.append(
             ModuleMetrics(
                 module_id=module_id,
-                name=node.name,
+                name=module_node.name,
                 files=file_count,
                 afferent=len(afferent[module_id]),
                 efferent=len(efferent[module_id]),

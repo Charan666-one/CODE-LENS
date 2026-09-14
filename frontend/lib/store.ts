@@ -8,6 +8,7 @@ import {
   fetchViewSpec,
   runQuery,
 } from "./api";
+import type { SearchHit } from "./search";
 import type {
   BlastResult,
   EndpointRef,
@@ -31,9 +32,26 @@ import type {
 
 export type Phase = "idle" | "understanding" | "revealing" | "exploring";
 
+export type Dimension = "2d" | "3d";
+
+/** Where the reader's choice of view is kept between visits. */
+export const DIMENSION_KEY = "codelens.dimension";
+
 interface GraphState {
   phase: Phase;
   error: string | null;
+
+  /** Something the reader asked for did not happen, in one line.
+   *
+   *  `error` belongs to the landing page and is only ever seen while idle, so
+   *  every failure *after* a graph exists had nowhere to go: a level change, a
+   *  dive, a query and an impact all rejected into an unhandled promise and
+   *  left the interface looking exactly as if the click had been ignored.
+   *  Which is the worst way for software to fail — the reader concludes the
+   *  button is broken, or that they imagined pressing it.
+   */
+  notice: string | null;
+  clearNotice: () => void;
 
   snapshotId: number | null;
   repoUrl: string | null;
@@ -61,7 +79,10 @@ interface GraphState {
   rippleEndpoints: EndpointRef[];
 
   analyze: (source: string) => Promise<void>;
-  setZoom: (zoom: number) => Promise<void>;
+  /** Resolves `false` when the level could not be loaded, so a caller in the
+   *  middle of a longer move — a dive, a search landing — can stop rather
+   *  than carry on against a level that never arrived. */
+  setZoom: (zoom: number) => Promise<boolean>;
   advanceStage: () => void;
   beginReveal: () => void;
   advanceReveal: () => void;
@@ -91,6 +112,21 @@ interface GraphState {
   paletteOpen: boolean;
   setPalette: (open: boolean) => void;
 
+  /** Flat or deep.
+   *
+   *  Not a different product — the same ViewSpec, the same choreography, the
+   *  same encodings. The deep view adds one axis the flat one cannot draw:
+   *  height is how far down the import stack a file sits. A preference, and
+   *  nothing about the data changes with it.
+   *
+   *  Starts flat on purpose, and **must** start flat rather than reading
+   *  storage here: the top bar renders on the server, and a stored value read
+   *  at module scope would make the first client render disagree with it.
+   *  `HUD` restores the reader's choice in an effect instead.
+   */
+  dimension: Dimension;
+  setDimension: (dimension: Dimension) => void;
+
   /** The Graph Guide. Shown once unprompted on a first graph, then on
    *  request only — L1/L2/L3 is the least self-explanatory thing here and
    *  the explanation is worth exactly one interruption. */
@@ -106,6 +142,16 @@ interface GraphState {
   pendingFocus: string | null;
   dive: (nodeId: string) => Promise<void>;
   consumeFocus: () => void;
+
+  /** Search, as navigation.
+   *
+   *  A hit is a place on the map, so choosing one has to *arrive* — and the
+   *  level showing files cannot draw a function, nor L1 a file. Picking a
+   *  result therefore moves the camera and, when it has to, the depth: the
+   *  shallowest level that can actually draw the thing asked for. Without
+   *  this, half of every search silently did nothing.
+   */
+  goTo: (hit: SearchHit) => Promise<void>;
 
   /** A query's answer, drawn ON the graph.
    *
@@ -132,9 +178,14 @@ export interface Overlay {
   count: number;
 }
 
+/** Monotonic id of the latest level request; see `setZoom`. */
+let zoomRequest = 0;
+
 export const useGraphStore = create<GraphState>((set, get) => ({
   phase: "idle",
   error: null,
+  notice: null,
+  clearNotice: () => set({ notice: null }),
   snapshotId: null,
   repoUrl: null,
   stages: [],
@@ -151,7 +202,14 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   rippleEndpoints: [],
 
   analyze: async (source: string) => {
-    set({ phase: "understanding", error: null, stages: [], stagesShown: 0, spec: null });
+    set({
+      phase: "understanding",
+      error: null,
+      notice: null,
+      stages: [],
+      stagesShown: 0,
+      spec: null,
+    });
     try {
       const result = await analyzeRepo(source);
       const spec = await fetchViewSpec(result.snapshot_id, get().zoom);
@@ -176,9 +234,27 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
   setZoom: async (zoom: number) => {
     const { snapshotId } = get();
-    if (snapshotId === null) return;
-    const spec = await fetchViewSpec(snapshotId, zoom);
+    if (snapshotId === null) return false;
+    // Press 3 then 2 quickly and both fetches go out; without this, whichever
+    // answered *last* won, so the level on screen could be the one pressed
+    // first. Only the most recent request is allowed to land.
+    const request = ++zoomRequest;
+    let spec: ViewSpec;
+    try {
+      spec = await fetchViewSpec(snapshotId, zoom);
+    } catch (failure) {
+      if (request !== zoomRequest) return false; // superseded: say nothing
+      // Nothing has changed yet — `zoom` is only committed below, on success —
+      // so the level buttons still show where the reader actually is. All that
+      // is missing is saying so.
+      set({
+        notice: `Could not open L${zoom} — ${(failure as Error).message}`,
+      });
+      return false;
+    }
+    if (request !== zoomRequest) return false; // a later press has taken over
     set({
+      notice: null,
       zoom,
       spec,
       // Zoom switches are instant: the reveal belongs to the first arrival.
@@ -189,6 +265,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       rippleFor: null,
       selectedId: null,
     });
+    return true;
   },
 
   advanceStage: () => set((s) => ({ stagesShown: Math.min(s.stagesShown + 1, s.stages.length) })),
@@ -240,15 +317,23 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     if (snapshotId === null) return;
     // Endpoints are a second question about the same change; asking both at
     // once means the wave never arrives at a readout that is still loading.
-    const [blast, endpoints] = await Promise.all([
-      fetchBlastRadius(snapshotId, nodeId),
-      runQuery(snapshotId, "endpoints", { node_id: nodeId }).catch(() => null),
-    ]);
+    let blast: BlastResult;
+    let endpoints: QueryResult | null;
+    try {
+      [blast, endpoints] = await Promise.all([
+        fetchBlastRadius(snapshotId, nodeId),
+        runQuery(snapshotId, "endpoints", { node_id: nodeId }).catch(() => null),
+      ]);
+    } catch (failure) {
+      set({ notice: `Could not trace the impact — ${(failure as Error).message}` });
+      return;
+    }
     const maxDistance = Math.max(
       1,
       ...blast.ranked.map((entry) => entry.reasons.distance),
     );
     set({
+      notice: null,
       blast,
       rippleFor: nodeId,
       selectedId: nodeId,
@@ -295,6 +380,16 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   guideOpen: false,
   setGuide: (open) => set({ guideOpen: open }),
 
+  dimension: "2d",
+  setDimension: (dimension) => {
+    set({ dimension });
+    try {
+      window.localStorage.setItem(DIMENSION_KEY, dimension);
+    } catch {
+      /* storage disabled — the choice still holds for this session */
+    }
+  },
+
   pendingFocus: null,
   consumeFocus: () => set({ pendingFocus: null }),
 
@@ -308,7 +403,31 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     // which is what makes the movement read as going *inward* rather than
     // sideways to another view.
     set({ pendingFocus: node.kind === "cluster" ? node.label : node.cluster });
-    await get().setZoom(zoom + 1);
+    // A focus that outlives a failed dive is worse than no focus: the next
+    // level change to succeed would silently frame itself on a district the
+    // reader asked about minutes ago.
+    if (!(await get().setZoom(zoom + 1))) set({ pendingFocus: null });
+  },
+
+  goTo: async (hit) => {
+    const { spec, zoom } = get();
+    // Symbols only exist at L3; files and modules first appear at L2. If the
+    // level on screen already draws the hit — or the file holding it, which
+    // is how a symbol is represented one level up — stay where the reader is.
+    const target = hit.kind === "function" || hit.kind === "class" ? 3 : 2;
+    if (!drawable(spec, hit) && zoom !== target) {
+      // Selecting into a level that failed to load would light nothing and
+      // say nothing. `setZoom` has already explained itself; stop here.
+      // `false` also covers being overtaken: if the reader dived or pressed
+      // a level key while this was in flight, that later request owns the
+      // screen and this landing stands down rather than completing on top.
+      if (!(await get().setZoom(target))) return;
+    }
+    // The graph foregrounds one answer at a time; landing a search on a node
+    // an overlay has dimmed is arriving in the dark. And arriving anywhere
+    // clears the last thing that did not work.
+    set({ paletteOpen: false, overlay: null, overlayError: null, notice: null });
+    get().select(hit.id);
   },
 
   overlay: null,
@@ -317,7 +436,16 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   runOverlay: async (name, label, params = {}) => {
     const { snapshotId } = get();
     if (snapshotId === null) return;
-    set({ paletteOpen: false, overlayError: null, selectedId: null, blast: null, rippleFor: null });
+    set({
+      paletteOpen: false,
+      overlayError: null,
+      // Anything that works clears the last thing that did not: a notice
+      // about a failure the reader has already moved past is just noise.
+      notice: null,
+      selectedId: null,
+      blast: null,
+      rippleFor: null,
+    });
     try {
       const result = await runQuery(snapshotId, name, params);
       const groups = groupsFor(name, result);
@@ -338,12 +466,27 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       // an overlay and a shrug.
       if (nodeIds.length > 0 && get().zoom === 1) await get().setZoom(2);
     } catch (error) {
-      set({ overlayError: (error as Error).message });
+      // `overlayError` was set here and rendered by nobody, so a query that
+      // failed looked exactly like a query that found nothing.
+      const message = (error as Error).message;
+      set({ overlayError: message, notice: `Could not run that query — ${message}` });
     }
   },
 
   clearOverlay: () => set({ overlay: null, overlayError: null }),
 }));
+
+/** Can the level currently on screen show this hit at all?
+ *
+ *  Either as itself, or as the file that contains it — the substitution the
+ *  renderer and the ripple both already make for a symbol at L2.
+ */
+function drawable(spec: ViewSpec | null, hit: SearchHit): boolean {
+  if (!spec) return false;
+  return spec.nodes.some(
+    (node) => node.id === hit.id || (!!hit.path && node.id === `file:${hit.path}`),
+  );
+}
 
 /** Some answers are made of distinct groups rather than one set. A cycle is
  *  only meaningful as a loop, so the renderer needs them kept apart. */

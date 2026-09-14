@@ -29,6 +29,11 @@ class RawImport:
     #: Seen under `if TYPE_CHECKING:` / written as `import type` — a real
     #: source dependency that does not exist at runtime. See Edge.type_only.
     type_only: bool = False
+    #: A bare specifier naming a *package* (`react`, `@scope/ui`), not a path
+    #: into this repository. Recorded so Layer B can see it, and flagged so
+    #: first-party resolution never touches it: a repo containing `react.js`
+    #: must not have `require('react')` bind to it.
+    bare: bool = False
 
 
 @dataclass

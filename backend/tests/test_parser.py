@@ -69,12 +69,21 @@ def test_node_ids_follow_the_convention(codelens_graph: KnowledgeGraph) -> None:
 def test_every_node_except_the_repository_has_a_container(
     codelens_graph: KnowledgeGraph,
 ) -> None:
-    """CONTAINS must span the graph: repo -> module -> file -> class -> function."""
+    """CONTAINS must span the *file tree*: repo -> module -> file -> class ->
+    function.
+
+    Two node kinds are outside it by nature and are exempt rather than forced
+    in. An external package is not contained by the repository that depends
+    on it, and neither is a contributor; hanging them off the repository node
+    would keep this assertion green by making CONTAINS mean two things, which
+    costs more than the exemption does.
+    """
+    outside_the_tree = {NodeKind.REPOSITORY, NodeKind.EXTERNAL_DEPENDENCY, NodeKind.AUTHOR}
     contained = {target for _, target in edges_of(codelens_graph, EdgeKind.CONTAINS)}
     orphans = [
         node.id
         for node in codelens_graph.nodes
-        if node.kind is not NodeKind.REPOSITORY and node.id not in contained
+        if node.kind not in outside_the_tree and node.id not in contained
     ]
     assert orphans == []
 

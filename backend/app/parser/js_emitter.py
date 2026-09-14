@@ -65,15 +65,29 @@ def js_module_qname(path: str) -> str:
     return ".".join(parts)
 
 
-def resolve_alias(specifier: str, aliases: dict[str, str]) -> str | None:
+def resolve_alias(
+    specifier: str, alias_sets: dict[str, dict[str, str]], importing_path: str = ""
+) -> str | None:
     """Resolve a tsconfig path alias to a repo-relative module qname.
 
     Next.js and most TS apps import their own code through aliases like
     `@/components/Navbar`, mapped in tsconfig `compilerOptions.paths`. Without
-    this they look external and the app's real wiring is invisible. `aliases`
-    maps an alias prefix ("@/") to a dotted module prefix ("src."); the longest
-    matching prefix wins.
+    this they look external and the app's real wiring is invisible.
+
+    `alias_sets` is keyed by the directory each config governs, because an
+    alias means different things in different parts of a monorepo: two
+    packages can both define `@/` and each means its own `src/`. The config
+    nearest the importing file wins — the same rule the TypeScript compiler
+    applies — so resolution is correct rather than coincidental.
     """
+    governing = ""
+    for directory in alias_sets:
+        if directory and not importing_path.startswith(f"{directory}/"):
+            continue
+        if len(directory) >= len(governing):
+            governing = directory
+    aliases = alias_sets.get(governing) or alias_sets.get("") or {}
+
     for prefix in sorted(aliases, key=len, reverse=True):
         if specifier.startswith(prefix):
             rest = specifier[len(prefix) :].replace("/", ".")
@@ -139,7 +153,7 @@ class JsEmitter:
         self,
         language: Language | None = None,
         language_name: str = "JavaScript",
-        aliases: dict[str, str] | None = None,
+        aliases: dict[str, dict[str, str]] | None = None,
     ) -> None:
         self._parser = Parser(language or _LANGUAGE)
         self._language_name = language_name
@@ -183,7 +197,7 @@ class _JsWalker:
         facts: FileFacts,
         source: bytes,
         language_name: str = "JavaScript",
-        aliases: dict[str, str] | None = None,
+        aliases: dict[str, dict[str, str]] | None = None,
     ) -> None:
         self.facts = facts
         self.source = source
@@ -200,6 +214,15 @@ class _JsWalker:
             self._record_esm_import(node)
             return
         if kind == "export_statement":
+            # A re-export is an import that also republishes. `export * from
+            # './x'` and `export { a } from './b'` are how barrel files —
+            # every `index.ts` in a modern TS package — expose their
+            # internals, and recording nothing for them meant a barrel looked
+            # like a file that depends on nothing while everything downstream
+            # depended on it.
+            if node.child_by_field_name("source") is not None:
+                self._record_esm_import(node)
+                return
             for child in node.children:  # unwrap: `export function f` etc.
                 if child.is_named:
                     self.visit(child, ctx)
@@ -468,10 +491,19 @@ class _JsWalker:
             return
         specifier = source_node.text.decode("utf-8", errors="replace").strip("'\"")
         target = _resolve_relative(specifier, self.facts.path) or resolve_alias(
-            specifier, self.aliases
+            specifier, self.aliases, self.facts.path
         )
         if target is None:
-            return  # bare specifier: external package, Layer B's business
+            # A bare specifier (`react`, `@scope/ui`) names a package, not a
+            # file here. It used to be dropped on the floor with a comment
+            # deferring it to "Layer B" — and when Layer B arrived, JS
+            # dependencies were invisible because the fact never reached it.
+            # Recorded as-is: no file matches the name, so no IMPORTS edge is
+            # produced, and externals.py can finally see it.
+            target = specifier
+            bare = True
+        else:
+            bare = False
 
         # `import type { X } from './y'` — erased by the compiler, and the
         # TypeScript equivalent of Python's `if TYPE_CHECKING:` block. It is a
@@ -486,7 +518,12 @@ class _JsWalker:
 
         names: list[tuple[str, str]] = []
         for clause in node.children:
-            if clause.type != "import_clause":
+            # `import_clause` for imports, `export_clause` for re-exports —
+            # the specifier shapes inside are the same, so one walk serves
+            # both and a barrel's bindings enter the import map exactly like
+            # an import's would. That is what lets `_follow_reexports` hop
+            # through `index.ts` to the file that really defines a symbol.
+            if clause.type not in ("import_clause", "export_clause"):
                 continue
             for item in clause.children:
                 if item.type == "identifier" and item.text is not None:
@@ -499,9 +536,11 @@ class _JsWalker:
                             names.append(
                                 ("", inner.text.decode("utf-8", errors="replace"))
                             )
-                elif item.type == "named_imports":
-                    for spec in item.children:
-                        if spec.type != "import_specifier":
+                elif item.type in ("named_imports", "export_specifier"):
+                    for spec in (
+                        item.children if item.type == "named_imports" else [item]
+                    ):
+                        if spec.type not in ("import_specifier", "export_specifier"):
                             continue
                         identifiers = [
                             child.text.decode("utf-8", errors="replace")
@@ -515,7 +554,10 @@ class _JsWalker:
 
         if not names:  # side-effect import: `import './setup.js'`
             self.facts.imports.append(
-                RawImport(module=target, level=0, names=[], line=line, type_only=type_only)
+                RawImport(
+                    module=target, level=0, names=[], line=line,
+                    type_only=type_only, bare=bare,
+                )
             )
             return
         for original, alias in names:
@@ -524,7 +566,7 @@ class _JsWalker:
                 self.facts.imports.append(
                     RawImport(
                         module=target, level=0, names=[("", alias)], line=line,
-                        type_only=type_only,
+                        type_only=type_only, bare=bare,
                     )
                 )
             else:
@@ -547,10 +589,13 @@ class _JsWalker:
         if specifier is None:
             return
         target = _resolve_relative(specifier, self.facts.path) or resolve_alias(
-            specifier, self.aliases
+            specifier, self.aliases, self.facts.path
         )
         if target is None:
-            return
+            target = specifier  # a package, not a file — see _record_esm_import
+            bare = True
+        else:
+            bare = False
 
         name_node = declarator.child_by_field_name("name")
         if name_node is None:
@@ -558,7 +603,7 @@ class _JsWalker:
         if name_node.type == "identifier" and name_node.text is not None:
             alias = name_node.text.decode("utf-8", errors="replace")
             self.facts.imports.append(
-                RawImport(module=target, level=0, names=[("", alias)], line=line)
+                RawImport(module=target, level=0, names=[("", alias)], line=line, bare=bare)
             )
         elif name_node.type == "object_pattern":
             # const { one, two } = require('./pair')  ->  named bindings
@@ -569,7 +614,10 @@ class _JsWalker:
                 ):
                     bound = prop.text.decode("utf-8", errors="replace")
                     self.facts.imports.append(
-                        RawImport(module=target, level=0, names=[(bound, bound)], line=line)
+                        RawImport(
+                            module=target, level=0, names=[(bound, bound)],
+                            line=line, bare=bare,
+                        )
                     )
 
     # ── calls & entrypoints ───────────────────────────────────────────────

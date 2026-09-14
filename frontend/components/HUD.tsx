@@ -1,7 +1,9 @@
 "use client";
 
+import { useEffect } from "react";
+import SearchBar from "@/components/SearchBar";
 import { STAGE_COPY, impactCounts } from "@/lib/impact";
-import { useGraphStore } from "@/lib/store";
+import { DIMENSION_KEY, useGraphStore } from "@/lib/store";
 
 /** The top bar and the one-line readout at the bottom. Nothing else.
  *
@@ -10,6 +12,11 @@ import { useGraphStore } from "@/lib/store";
  *  card was competing with the graph for the right-hand edge.
  */
 const LEVEL_NAMES = ["Architecture", "Modules", "Symbols"];
+
+const DIMENSIONS = [
+  { id: "2d" as const, label: "2D", hint: "The flat map" },
+  { id: "3d" as const, label: "3D", hint: "Height is depth in the import stack" },
+];
 
 export default function HUD() {
   const phase = useGraphStore((s) => s.phase);
@@ -27,6 +34,21 @@ export default function HUD() {
   const setGuide = useGraphStore((s) => s.setGuide);
   const rippleFront = useGraphStore((s) => s.rippleFront);
   const rippleEndpoints = useGraphStore((s) => s.rippleEndpoints);
+  const dimension = useGraphStore((s) => s.dimension);
+  const setDimension = useGraphStore((s) => s.setDimension);
+  const notice = useGraphStore((s) => s.notice);
+  const clearNotice = useGraphStore((s) => s.clearNotice);
+
+  // Restore the reader's last choice here rather than in the store, because
+  // this bar is rendered on the server: a stored value read at module scope
+  // would make the first client render disagree with the server's.
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(DIMENSION_KEY) === "3d") setDimension("3d");
+    } catch {
+      /* private mode: flat is a fine default, and never nag about it */
+    }
+  }, [setDimension]);
 
   if (phase !== "exploring" && phase !== "revealing") return null;
 
@@ -43,6 +65,7 @@ export default function HUD() {
       <header className="hud-top">
         <span className="brand">CodeLens</span>
         <span className="repo">{repoName}</span>
+        <SearchBar />
         <button
           className="guide-open"
           onClick={() => setGuide(true)}
@@ -54,6 +77,20 @@ export default function HUD() {
         <button className="palette-open" onClick={() => setPalette(true)}>
           <span className="kbd">⌘K</span>
         </button>
+        {/* Depth of detail and dimensionality are both "how am I looking at
+            this", so they sit together. */}
+        <nav className="zoom dimension">
+          {DIMENSIONS.map((option) => (
+            <button
+              key={option.id}
+              className={option.id === dimension ? "active" : ""}
+              onClick={() => setDimension(option.id)}
+              title={option.hint}
+            >
+              {option.label}
+            </button>
+          ))}
+        </nav>
         <nav className="zoom">
           {[1, 2, 3].map((level) => (
             <button
@@ -76,6 +113,20 @@ export default function HUD() {
           </span>
           {overlay.detail && <span className="overlay-detail">{overlay.detail}</span>}
           <button className="overlay-clear" onClick={clearOverlay} aria-label="Clear">
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* When something the reader asked for did not happen. Above the
+          readout rather than beside the overlay bar, because the two can be
+          true at once and a notice must never sit on top of the answer it is
+          apologising about. Yellow: a request did not complete, which is a
+          warning, not a broken product. */}
+      {notice && (
+        <div className="notice-bar" role="status">
+          <span className="notice-text">{notice}</span>
+          <button className="overlay-clear" onClick={clearNotice} aria-label="Dismiss">
             ✕
           </button>
         </div>

@@ -13,8 +13,11 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+import app.api.admission as admission
 import app.api.routes as routes
 import app.api.semantic_routes as semantic
+from app.core import jobs
+from app.core.config import settings
 from app.core.graph_cache import cache as graph_cache
 from app.graph.store import SQLiteGraphStore
 from app.main import app
@@ -29,10 +32,20 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     monkeypatch.setenv("CODELENS_ALLOW_LOCAL_ANALYSIS", "1")
     store = SQLiteGraphStore(tmp_path / "api.db")
     monkeypatch.setattr(routes, "_STORE", store)
+    # The lifespan opens a JobStore at SQLITE_PATH. Without this a test run
+    # writes job rows into the real data volume, and jobs persisted by one
+    # test are visible to the next through the registry's database fallback.
+    monkeypatch.setattr(settings, "SQLITE_PATH", tmp_path / "jobs.db")
     graph_cache.clear()  # snapshot ids restart per test; never serve a stale graph
     semantic._INDEXES.clear()
+    # Limits are per process, and the whole suite is one process behind one
+    # client address — without this the sixth test to analyse anything would
+    # be rate-limited by the fifth. The limits themselves are exercised
+    # deliberately in test_limits.py.
+    admission.reset()
     with TestClient(app) as test_client:
         yield test_client
+    jobs.registry.drain()  # never close a store under a running job
     store.close()
 
 
@@ -86,18 +99,32 @@ def test_concept_search_needs_no_llm(client: TestClient) -> None:
 # ── narrated: honest 503 without a key ────────────────────────────────────
 
 
+def test_narration_is_off_unless_switched_on(client: TestClient) -> None:
+    """The default, and the point of the gate.
+
+    A key sitting in the environment must not by itself expose a public
+    endpoint that spends it. `NARRATION_ENABLED` defaults to false, so this
+    is what an unconfigured instance does — including one whose operator has
+    a key set for their own use.
+    """
+    snapshot_id = analyze_fixture(client)
+    response = client.post(f"/api/repos/{snapshot_id}/answers/project")
+
+    assert response.status_code == 503
+    assert "disabled" in response.json()["detail"].lower()
+
+
 def test_narrated_answers_503_cleanly_without_key(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The unconfigured path, forced rather than assumed.
+    """Narration on, provider absent — still an honest 503, not a crash.
 
     This test used to rely on the developer's machine having no API key —
     which stopped being true the moment one was added, and the suite went
     red for a reason that had nothing to do with the code. A test about the
     absence of configuration has to create that absence itself.
     """
-    from app.core.config import settings
-
+    monkeypatch.setattr(settings, "NARRATION_ENABLED", True)
     for key in ("GROQ_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
         monkeypatch.setattr(settings, key, None)
     monkeypatch.setattr(settings, "LLM_PROVIDER", "auto")
@@ -106,6 +133,26 @@ def test_narrated_answers_503_cleanly_without_key(
     response = client.post(f"/api/repos/{snapshot_id}/answers/project")
     assert response.status_code == 503
     assert "ANTHROPIC_API_KEY" in response.json()["detail"]
+
+
+def test_deterministic_answers_do_not_need_narration(client: TestClient) -> None:
+    """The whole justification for defaulting narration off: with it disabled,
+    every factual surface still works. If this test ever fails, the gate has
+    started removing product rather than removing spend."""
+    snapshot_id = analyze_fixture(client)
+
+    assert client.get(f"/api/repos/{snapshot_id}/viewspec?zoom=2").status_code == 200
+    assert client.get(f"/api/repos/{snapshot_id}/answers/learning_path").status_code == 200
+    assert (
+        client.post(f"/api/repos/{snapshot_id}/search", json={"text": "add"}).status_code == 200
+    )
+    assert (
+        client.post(
+            f"/api/repos/{snapshot_id}/query/blast_radius",
+            json={"params": {"node_id": "function:calculator.add"}},
+        ).status_code
+        == 200
+    )
 
 
 def test_project_story_with_injected_model(

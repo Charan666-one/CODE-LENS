@@ -194,6 +194,115 @@ def test_assembly_replays_construction_order(tiny_graph: KnowledgeGraph) -> None
     assert order["file:calculator.py"] > order["file:main.py"]
 
 
+def test_depth_stacks_the_code_under_what_imports_it(
+    tiny_graph: KnowledgeGraph,
+) -> None:
+    """The third axis is a measured fact: nothing imports main.py, so it is the
+    surface, and the file it imports sits exactly one layer under."""
+    spec = compile_viewspec(tiny_graph, zoom=2)
+    depth = {node.id: node.depth for node in spec.nodes}
+    assert depth["file:main.py"] == 0
+    assert depth["file:calculator.py"] == 1
+
+
+def test_depth_becomes_height_in_the_layout(codelens_graph: KnowledgeGraph) -> None:
+    """`z` is `depth` placed in the coordinate space, deeper = lower, and the
+    axis is recentred like the other two rather than hanging below zero."""
+    spec = compile_viewspec(codelens_graph, zoom=2)
+    assert len({node.depth for node in spec.nodes}) > 1, "a stack, not a plane"
+    shallow = min(spec.nodes, key=lambda node: node.depth)
+    deep = max(spec.nodes, key=lambda node: node.depth)
+    assert shallow.z > deep.z
+    assert abs(sum(node.z for node in spec.nodes)) < 1e-6  # centred
+
+
+def test_every_import_points_downward(codelens_graph: KnowledgeGraph) -> None:
+    """The property that makes the axis worth having: a file always sits below
+    everything that imports it, so no edge climbs back up the stack. This is
+    what the *longest* chain buys over the shortest one."""
+    spec = compile_viewspec(codelens_graph, zoom=2)
+    depth = {node.id: node.depth for node in spec.nodes}
+    entrypoints = {node.id for node in spec.nodes if node.is_entrypoint}
+    climbing = [
+        (edge.source, edge.target)
+        for edge in spec.edges
+        if edge.kind == "imports"
+        and edge.target not in entrypoints  # the surface is pinned there
+        and depth.get(edge.target, 0) <= depth.get(edge.source, 0)
+    ]
+    assert not climbing, f"imports that point upward: {climbing[:3]}"
+
+
+def test_the_surface_is_what_nothing_imports(codelens_graph: KnowledgeGraph) -> None:
+    """A library has no `__main__` anywhere. Seeding the stack only from
+    entrypoints left jinja as two flat bands — one file on top and everything
+    else in an undifferentiated floor — so the surface is every file nothing
+    else imports, entrypoints included."""
+    spec = compile_viewspec(codelens_graph, zoom=2)
+    surface = [node for node in spec.nodes if node.depth == 0]
+    assert len(surface) > 1
+    assert max(node.depth for node in spec.nodes) >= 2, "a stack, not two bands"
+
+
+def _import_graph(edges: list[tuple[str, str]]) -> KnowledgeGraph:
+    """A synthetic repo from `(importer, imported)` file pairs."""
+    from app.graph.schema import Edge
+
+    names = sorted({name for pair in edges for name in pair})
+    nodes = [
+        Node(
+            id=f"file:{name}",
+            kind=NodeKind.FILE,
+            name=name,
+            qualified_name=name,
+            file_path=name,
+        )
+        for name in names
+    ]
+    snapshot = RepoSnapshot(
+        repo_url="https://example.test/cyclic/repo",
+        commit_sha="1" * 40,
+        primary_language="Python",
+        languages={"py": len(nodes)},
+        file_count=len(nodes),
+        analyzed_at="2026-01-01T00:00:00+00:00",
+    )
+    return KnowledgeGraph(
+        snapshot=snapshot,
+        nodes=nodes,
+        edges=[
+            Edge(source_id=f"file:{src}", target_id=f"file:{dst}", kind=EdgeKind.IMPORTS)
+            for src, dst in edges
+        ],
+    )
+
+
+def test_a_cycle_sits_below_whatever_reaches_it() -> None:
+    """The case a one-pass fallback got wrong: `y` was processed before its
+    only importer `z`, saw nothing placed, and landed on the surface — with the
+    z -> y import pointing upward. Both members of a loop share one layer, one
+    below the deepest thing outside the loop that reaches them, and the answer
+    must not depend on which name sorts first."""
+    chain = [("top.py", "mid.py"), ("mid.py", "core.py")]
+    for first, second in (("z.py", "y.py"), ("y.py", "z.py")):
+        graph = _import_graph(chain + [("core.py", first), (first, second), (second, first)])
+        depth = {node.id: node.depth for node in compile_viewspec(graph, zoom=2).nodes}
+        assert depth["file:core.py"] == 2
+        assert depth[f"file:{first}"] == depth[f"file:{second}"] == 3
+        assert max(depth.values()) == 3, "a loop never lifts itself"
+
+
+def test_code_downstream_of_a_cycle_still_layers() -> None:
+    """A file only reachable *through* a loop never reaches zero predecessors
+    either. It is not part of the loop, so it sits one below it."""
+    graph = _import_graph([
+        ("core.py", "a.py"), ("a.py", "b.py"), ("b.py", "a.py"), ("b.py", "leaf.py"),
+    ])
+    depth = {node.id: node.depth for node in compile_viewspec(graph, zoom=2).nodes}
+    assert depth["file:a.py"] == depth["file:b.py"] == 1
+    assert depth["file:leaf.py"] == 2
+
+
 def test_risk_colors_span_a_ramp(codelens_graph: KnowledgeGraph) -> None:
     spec = compile_viewspec(codelens_graph, zoom=2)
     non_entry = [node for node in spec.nodes if not node.is_entrypoint]
@@ -240,6 +349,9 @@ def test_huge_repo_is_capped_to_the_render_limit() -> None:
         "files": total_files,
         "rendered_nodes": _MAX_RENDERED_FILES,
         "truncated": True,
+        # Hubs import the leaves and nothing imports the hubs, so the stack
+        # is exactly two layers deep.
+        "depth_max": 1,
     }
 
 
