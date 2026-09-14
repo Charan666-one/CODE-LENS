@@ -22,6 +22,10 @@ class GraphView:
 
     def __init__(self, graph: KnowledgeGraph) -> None:
         self.snapshot = graph.snapshot
+        #: Memo for expensive per-graph computations (PageRank). The view is
+        #: cached per snapshot and a snapshot's structure never changes, so
+        #: anything derived purely from it can be computed once.
+        self.memo: dict[str, object] = {}
         self.nodes_by_id: dict[str, Node] = {node.id: node for node in graph.nodes}
         self.g = nx.MultiDiGraph()
         for node in graph.nodes:
@@ -34,6 +38,8 @@ class GraphView:
                 confidence=edge.confidence,
                 file_path=edge.file_path,
                 line=edge.line,
+                weight=edge.weight,
+                type_only=edge.type_only,
             )
 
     # ── basics ────────────────────────────────────────────────────────────

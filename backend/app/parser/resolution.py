@@ -23,6 +23,7 @@ ones: calls need the class hierarchy, which needs import maps.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 
 from app.graph.schema import CallConfidence, Edge, EdgeKind, EntrypointKind, Node, NodeKind
@@ -83,6 +84,34 @@ def _is_bettable(name: str) -> bool:
     return name not in _GENERIC_METHOD_NAMES
 
 
+#: A dotted module name is specific enough to match on its own. A *bare* one
+#: is not: `json`, `types`, and `logging` are stdlib far more often than they
+#: are a repository's own top-level package, and a repo containing
+#: `vendor/json.py` must not capture every `import json` in the tree.
+_MIN_SUFFIX_SEGMENTS = 2
+
+#: The exception that makes `src/` layouts work. `import flask` inside the
+#: Flask repository does mean `src/flask/__init__.py`, and refusing it left
+#: the most-imported file in the project with no incoming edges at all.
+#: A bare name is therefore allowed to match when both hold:
+#:   * the file it would match is a *package root* — `__init__.py` or
+#:     `index.ts` — so the name really is a package, not a stray module, and
+#:   * the name is not a standard-library module.
+#: `sys.stdlib_module_names` is the authoritative list, so this needs no
+#: hand-maintained denylist that would rot with each Python release.
+_PACKAGE_ROOT_FILES = (
+    "__init__.py",
+    "__init__.pyi",
+    "index.js",
+    "index.jsx",
+    "index.mjs",
+    "index.cjs",
+    "index.ts",
+    "index.tsx",
+)
+_STDLIB_NAMES = frozenset(sys.stdlib_module_names)
+
+
 class SymbolTable:
     """Everything known about the repository once every file has been walked."""
 
@@ -98,6 +127,7 @@ class SymbolTable:
                 self.modules.setdefault(f.module_qname[: -len(".index")], f.path)
         self.file_ids: dict[str, str] = {f.path: f.file_node.id for f in facts}
         self._qname_by_path: dict[str, str] = {f.path: f.module_qname for f in facts}
+        self._init_suffix_index()
         self.functions: dict[str, str] = {}
         self.classes: dict[str, str] = {}
         for file_facts in facts:
@@ -108,11 +138,61 @@ class SymbolTable:
                     self.classes.setdefault(node.qualified_name, node.id)
         self._init_methods_index(facts)
 
-    def canonical_module(self, module_qname: str) -> str:
-        """The real qname of the file a module name lands on. Identity for
-        Python; for JS it maps an aliased `store` to `store.index`, so that
-        symbol candidates are built against names that actually exist."""
+    def _init_suffix_index(self) -> None:
+        """Index every module by each trailing part of its name.
+
+        Module names here are derived from the path relative to the *analysis
+        root*, but import statements are written relative to the language's
+        own source root, and those are rarely the same directory. `backend/`,
+        `src/`, `packages/core/src/`, a Next.js `@/` alias — each puts the
+        code one or more levels below where imports start counting from.
+
+        Without this, analysing a repo at its root instead of at its source
+        directory silently loses almost every import edge: CodeLens's own
+        tree went from 179 IMPORTS to 5, and nothing anywhere said so. That is
+        the worst class of bug this project can have, because a graph missing
+        its edges still looks like a graph.
+
+        Ambiguous suffixes resolve to nothing. If two files could both answer
+        to `utils.helpers`, guessing between them would trade a missing edge
+        for a wrong one, and a wrong edge is the more expensive mistake.
+        """
+        counts: dict[str, list[str]] = {}
+        for qname, path in self.modules.items():
+            segments = qname.split(".")
+            is_package_root = path.endswith(_PACKAGE_ROOT_FILES)
+            # Every proper suffix; the full name is already an exact key.
+            for start in range(1, len(segments)):
+                suffix = ".".join(segments[start:])
+                if suffix.count(".") + 1 < _MIN_SUFFIX_SEGMENTS and not (
+                    is_package_root and suffix not in _STDLIB_NAMES
+                ):
+                    continue
+                counts.setdefault(suffix, []).append(path)
+
+        self._by_suffix: dict[str, str] = {
+            suffix: paths[0]
+            for suffix, paths in counts.items()
+            if len(set(paths)) == 1 and suffix not in self.modules
+        }
+
+    def module_path(self, module_qname: str) -> str | None:
+        """The file a module name lands on: exact match, else unique suffix."""
         path = self.modules.get(module_qname)
+        if path is not None:
+            return path
+        return self._by_suffix.get(module_qname)
+
+    def canonical_module(self, module_qname: str) -> str:
+        """The real qname of the file a module name lands on.
+
+        Identity when the name is already the file's own; otherwise the name
+        the file actually carries — `store` -> `store.index` for JS, and
+        `app.parser.resolution` -> `backend.app.parser.resolution` when the
+        analysis root sits above the source root. Callers build symbol
+        candidates from the result, so it must be a name that exists.
+        """
+        path = self.module_path(module_qname)
         if path is None:
             return module_qname
         return self._qname_by_path.get(path, module_qname)
@@ -186,6 +266,12 @@ def _build_import_map(facts: FileFacts, table: SymbolTable, emit: EmitEdge) -> I
     import_map: ImportMap = {}
 
     for raw in facts.imports:
+        if raw.bare:
+            # Names a package. Binding it would let a repo file that happens
+            # to share the name capture the import — `require('react')`
+            # resolving to a local react.js is a wrong edge, and a wrong edge
+            # costs more than the missing one. Layer B handles these.
+            continue
         # Canonicalise so symbol candidates use the qname the target file
         # really has ('store' -> 'store.index' when store/index.js answered).
         target_module = table.canonical_module(_target_module(raw, facts))
@@ -195,23 +281,42 @@ def _build_import_map(facts: FileFacts, table: SymbolTable, emit: EmitEdge) -> I
             if head:
                 import_map[head] = (head, True)
             import_map[target_module] = (target_module, True)
-            _emit_import_edge(facts, table, target_module, raw.line, emit)
+            _emit_import_edge(facts, table, target_module, raw.line, emit, type_only=raw.type_only)
             continue
 
         if len(raw.names) == 1 and raw.names[0][0] == "":  # `import a.b as c`
             import_map[raw.names[0][1]] = (target_module, True)
-            _emit_import_edge(facts, table, target_module, raw.line, emit)
+            _emit_import_edge(facts, table, target_module, raw.line, emit, type_only=raw.type_only)
             continue
 
         # `from module import name[, name as alias]`
-        _emit_import_edge(facts, table, target_module, raw.line, emit)
+        submodules: list[str] = []
         for original, alias in raw.names:
             candidate = f"{target_module}.{original}" if target_module else original
-            is_module = candidate in table.modules
+            is_module = table.module_path(candidate) is not None
             import_map[alias] = (candidate, is_module)
             if is_module:
-                # `from package import submodule` depends on the submodule's file
-                _emit_import_edge(facts, table, candidate, raw.line, emit)
+                submodules.append(candidate)
+
+        if submodules:
+            # `from . import cli` depends on `flask.cli`. It also *executes*
+            # `flask/__init__.py` on the way, but that is a module-loading
+            # detail rather than an architectural relationship — and recording
+            # it made every Python package with a re-exporting `__init__`
+            # look circular, because `__init__` imports the submodule right
+            # back. Flask reported 20 cycles, essentially all of this shape.
+            # The submodule is the dependency the author expressed; that is
+            # the edge worth keeping.
+            for candidate in submodules:
+                _emit_import_edge(
+                    facts, table, candidate, raw.line, emit, type_only=raw.type_only
+                )
+        else:
+            # `from .app import Flask` — the names are symbols, so the file
+            # that defines them is the dependency.
+            _emit_import_edge(
+                facts, table, target_module, raw.line, emit, type_only=raw.type_only
+            )
 
     return import_map
 
@@ -237,9 +342,15 @@ def _relative_base(module_qname: str, is_package: bool, level: int) -> str:
 
 
 def _emit_import_edge(
-    facts: FileFacts, table: SymbolTable, module_qname: str, line: int, emit: EmitEdge
+    facts: FileFacts,
+    table: SymbolTable,
+    module_qname: str,
+    line: int,
+    emit: EmitEdge,
+    *,
+    type_only: bool = False,
 ) -> None:
-    path = table.modules.get(module_qname)
+    path = table.module_path(module_qname)
     if path is None:  # third-party or stdlib: Layer B, not Layer A
         return
     target_id = table.file_ids[path]
@@ -252,6 +363,7 @@ def _emit_import_edge(
             kind=EdgeKind.IMPORTS,
             file_path=facts.path,
             line=line,
+            type_only=type_only,
         )
     )
 

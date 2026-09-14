@@ -188,9 +188,19 @@ def main() -> int:
                 )
                 check("blast radius over HTTP",
                       br.status_code == 200 and br.json()["meta"]["total_affected"] == 5)
+                # Both outcomes are correct, and which one you get depends on
+                # whether a key happens to be configured. Asserting only the
+                # 503 branch reported a red FAIL on a perfectly working
+                # machine — the fastest way to teach someone to ignore this
+                # script. What is actually being verified is that the answer
+                # is never a crash: prose with a key, an honest 503 without.
                 narrated = client.post(f"/api/repos/{sid}/answers/project")
-                check("narration 503s honestly without a key",
-                      narrated.status_code == 503)
+                keyed = narrated.status_code == 200
+                check(
+                    "narration answers or 503s, never crashes",
+                    keyed or narrated.status_code == 503,
+                    "narrated (key configured)" if keyed else "503, no key configured",
+                )
                 lp = client.get(f"/api/repos/{sid}/answers/learning_path")
                 check("learning path over HTTP, no key needed",
                       lp.status_code == 200 and lp.json()["model"] is None)

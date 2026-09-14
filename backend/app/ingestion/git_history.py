@@ -5,11 +5,20 @@ how many people touch it (author count), and when it last moved. These are
 deterministic facts from history — Layer C's down payment, feeding the risk
 formula (complexity × fan-in × churn) and the map's activity glow.
 
-Honest limitation, stated where it matters: a `--depth 1` shallow clone has
-one commit of history, so churn there is 1 for everything. Real churn needs
-real history — local working trees (dogfooding) and the GitHub App's clones
-(CP-8.1) have it; the free drive-by analysis may not. The graph records what
-the evidence supports and nothing more.
+The same pass also yields something the per-file rollup throws away: *which
+files changed together in one commit*. That is the raw material for co-change
+coupling (`app/graph/co_change.py`), so the log is parsed once into commits
+and both facts are derived from that — reading history twice for two views of
+the same bytes would be silly.
+
+History is bounded, not complete: clones fetch `HISTORY_DEPTH` commits
+(clone.py), so churn counts are "within the last N commits", and a repo older
+than that reports the recent past rather than all time. That is the right
+trade — recent history is what predicts today's behaviour — but it is a
+ceiling, and the numbers should be read as one.
+
+The blobless-clone constraint lives here: history is read with `--name-only`
+and must stay that way. See `_run_git_log`.
 """
 
 from __future__ import annotations
@@ -38,56 +47,104 @@ class FileHistory:
         return len(self.authors)
 
 
-def collect_history(root: Path, timeout_seconds: int = 60) -> dict[str, FileHistory]:
-    """Per-file history for the working tree at `root`, keyed by repo-relative
-    path (relative to `root`, matching the inventory and the graph).
+@dataclass(frozen=True)
+class Commit:
+    """One commit, reduced to what the temporal layer reasons about.
 
-    Returns an empty mapping when `root` has no git history — absence of
-    evidence is recorded as absence, never invented.
+    `files` are repo-relative paths in the same coordinate system as the
+    graph — the caller never has to think about git's top-level prefix.
+
+    `author` is the email, used only as an identity key: it distinguishes
+    people, and two commits by the same person under different display names
+    still merge. `display_name` is what may be shown. The graph stores a
+    digest of the former (see graph/ownership.py), never the address itself.
+    """
+
+    author: str
+    date: str  # ISO
+    files: tuple[str, ...]
+    display_name: str = ""
+
+
+def read_log(root: Path, timeout_seconds: int = 60) -> list[Commit]:
+    """Every non-merge commit touching the tree at `root`, newest first.
+
+    Empty when `root` has no git history — absence of evidence is recorded
+    as absence, never invented.
     """
     toplevel = _git_toplevel(root)
     if toplevel is None:
-        return {}
+        return []
 
     # Paths in git output are relative to the repository top level; the graph's
     # paths are relative to `root`. Strip the difference.
     try:
         prefix = root.resolve().relative_to(toplevel).as_posix()
     except ValueError:
-        return {}
+        return []
     prefix = "" if prefix == "." else prefix + "/"
 
     output = _run_git_log(root, timeout_seconds)
     if output is None:
-        return {}
+        return []
 
-    histories: dict[str, FileHistory] = {}
+    commits: list[Commit] = []
     author = ""
+    display_name = ""
     date = ""
+    files: list[str] = []
+
+    def flush() -> None:
+        if files:
+            commits.append(
+                Commit(
+                    author=author,
+                    date=date,
+                    files=tuple(files),
+                    display_name=display_name,
+                )
+            )
+
     for line in output.splitlines():
-        if line.startswith("\x01"):  # commit header: \x01<email>|<iso date>
-            author, _, date = line[1:].partition("|")
+        if line.startswith("\x01"):  # header: \x01<email>|<name>|<iso date>
+            flush()
+            files = []
+            author, _, rest = line[1:].partition("|")
+            display_name, _, date = rest.partition("|")
             continue
         if not line.strip():
             continue
-        # numstat rows: "<added>\t<deleted>\t<path>"
-        parts = line.split("\t")
-        if len(parts) != 3:
-            continue
-        path = _normalise_rename(parts[2])
+        # `--name-only` rows are the path alone.
+        path = _normalise_rename(line.strip())
         if prefix:
             if not path.startswith(prefix):
                 continue  # a file outside the analysed subtree
             path = path[len(prefix) :]
+        files.append(path)
+    flush()
 
-        history = histories.setdefault(path, FileHistory())
-        history.churn_count += 1
-        if author:
-            history.authors.add(author)
-        if history.last_modified is None:  # log is newest-first; first seen wins
-            history.last_modified = date or None
+    return commits
 
+
+def histories_from_commits(commits: list[Commit]) -> dict[str, FileHistory]:
+    """Roll commits up per file. `commits` must be newest-first, which is
+    what makes the first date seen the last-modified date."""
+    histories: dict[str, FileHistory] = {}
+    for commit in commits:
+        for path in commit.files:
+            history = histories.setdefault(path, FileHistory())
+            history.churn_count += 1
+            if commit.author:
+                history.authors.add(commit.author)
+            if history.last_modified is None:  # newest-first: first seen wins
+                history.last_modified = commit.date or None
     return histories
+
+
+def collect_history(root: Path, timeout_seconds: int = 60) -> dict[str, FileHistory]:
+    """Per-file history for the working tree at `root`, keyed by repo-relative
+    path (relative to `root`, matching the inventory and the graph)."""
+    return histories_from_commits(read_log(root, timeout_seconds))
 
 
 def apply_history(nodes: list[Node], histories: dict[str, FileHistory]) -> int:
@@ -135,8 +192,14 @@ def _run_git_log(root: Path, timeout_seconds: int) -> str | None:
                 str(root),
                 "log",
                 "--no-merges",
-                "--format=%x01%aE|%aI",
-                "--numstat",
+                "--format=%x01%aE|%aN|%aI",
+                # `--name-only`, never `--numstat`. Clones are blobless
+                # (clone.py `--filter=blob:none`), and numstat needs file
+                # *contents* to count changed lines, so it would lazily
+                # refetch every blob in the repository over the network —
+                # minutes of hanging for two numbers nothing here reads.
+                # Paths come from tree diffs, which a blobless clone has.
+                "--name-only",
             ],
             capture_output=True,
             text=True,

@@ -1,6 +1,6 @@
 # CodeLens Runbook — How to Run Everything
 
-*Every command below was executed and verified on July 23, 2026. Outputs shown are real.*
+*Every command below was executed and verified on August 16, 2026. Outputs shown are real.*
 
 **One rule that trips people up:** commands are written **from the project root** (`CODELENS/`). If your shell prompt already says `backend`, drop the `cd backend` part — that's what caused the `cd: no such file or directory: backend` error.
 
@@ -16,7 +16,7 @@ cd "/Users/srisaicharanp/Desktop/PENDING PROJECTS/CODELENS"
 cd backend && .venv/bin/python scripts/verify_system.py
 ```
 
-Clones a real repository and exercises **every subsystem** — pipeline, queries, viewspec, semantic layer, API. Takes ~15s, needs no API key, spends no tokens. Ends with `22/22 passed`.
+Clones a real repository and exercises **every subsystem** — pipeline, queries, viewspec, semantic layer, API. Takes ~15s, needs no API key, spends no tokens. Ends with `23/23 passed`.
 
 Point it at any repo:
 
@@ -30,7 +30,7 @@ cd backend && .venv/bin/python scripts/verify_system.py https://github.com/palle
 cd backend && .venv/bin/ruff check . && .venv/bin/mypy && .venv/bin/python -m pytest -q
 ```
 
-Expect: `All checks passed!` · `no issues found in 42 source files` · `199 passed, 1 skipped`.
+Expect: `All checks passed!` · `no issues found in 61 source files` · `292 passed, 1 skipped`.
 
 ---
 
@@ -217,5 +217,5 @@ Deploy, GitHub OAuth, private repos, Stripe, then the distribution engine (free 
 | Stage 4 | compiler + API ✅ · renderer verified live ✅ · ripple pending |
 | Languages | Python ✅ JavaScript ✅ (TypeScript needs its own grammar) |
 | Tests | 199 passing · ruff + mypy clean |
-| Verification | 22/22 end-to-end on a real repo |
+| Verification | 23/23 end-to-end on a real repo |
 | Tokens spent | $0 |

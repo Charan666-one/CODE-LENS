@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.core.pipeline import Stage, run_pipeline
+from app.core.pipeline import Stage, StageReport, run_pipeline
 from app.graph.schema import EdgeKind, KnowledgeGraph
 from app.graph.store import SQLiteGraphStore
 from app.graph.traversal import GraphView
@@ -108,8 +108,8 @@ def test_pipeline_builds_persists_and_skips_unchanged(tmp_path: Path) -> None:
     """The CP-1.4 gate, on CodeLens itself."""
     events: list[tuple[Stage, bool]] = []
 
-    def watch(stage: Stage, seconds: float, skipped: bool) -> None:
-        events.append((stage, skipped))
+    def watch(report: StageReport) -> None:
+        events.append((report.stage, report.skipped))
 
     with SQLiteGraphStore(tmp_path / "codelens.db") as store:
         first = run_pipeline(
@@ -164,6 +164,82 @@ def test_progress_events_are_the_real_stages(tmp_path: Path) -> None:
 
     seen: list[Stage] = []
     with SQLiteGraphStore(tmp_path / "g.db") as store:
-        result = run_pipeline(repo, store, on_progress=lambda s, t, k: seen.append(s))
+        result = run_pipeline(repo, store, on_progress=lambda r: seen.append(r.stage))
     assert seen == [Stage.CLONED, Stage.PARSED, Stage.METRICS, Stage.GRAPH_BUILT]
-    assert [s for s, _, _ in result.stages] == seen
+    assert [entry.stage for entry in result.stages] == seen
+
+    # Every detail is a count the stage actually took, so each one has to
+    # appear somewhere in the graph it describes. A stage that measured
+    # nothing says nothing rather than guessing.
+    by_stage = {entry.stage: entry for entry in result.stages}
+    assert by_stage[Stage.CLONED].detail == "1 files \u00b7 Python"
+    assert by_stage[Stage.PARSED].detail == f"{len(result.graph.nodes):,} nodes"
+    assert by_stage[Stage.GRAPH_BUILT].detail == f"{len(result.graph.edges):,} relationships"
+
+
+# ── concurrency: one repo, one pipeline ───────────────────────────────────
+
+
+def test_two_pipelines_on_one_source_do_not_overlap(tmp_path) -> None:
+    """A repository clones to a path derived from its name, so two runs share
+    a working tree — and a clone starts by deleting it. Observed in the app:
+    a double-click left a 172KB half-clone and a job stuck on "running".
+
+    This asserts the runs serialise rather than interleave.
+    """
+    import threading
+
+    from app.core import pipeline
+
+    source = tmp_path / "repo"
+    source.mkdir()
+    (source / "a.py").write_text("def a():\n    return 1\n")
+
+    inside = 0
+    overlapped = False
+    guard = threading.Lock()
+    real = pipeline._run_pipeline_locked
+
+    def watched(*args, **kwargs):
+        nonlocal inside, overlapped
+        with guard:
+            inside += 1
+            if inside > 1:
+                overlapped = True
+        try:
+            return real(*args, **kwargs)
+        finally:
+            with guard:
+                inside -= 1
+
+    pipeline._run_pipeline_locked = watched  # type: ignore[assignment]
+    try:
+        store = SQLiteGraphStore(tmp_path / "graph.db")
+        threads = [
+            threading.Thread(target=lambda: pipeline.run_pipeline(source, store))
+            for _ in range(4)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+    finally:
+        pipeline._run_pipeline_locked = real  # type: ignore[assignment]
+
+    assert not overlapped, "two pipelines ran against the same clone directory at once"
+
+
+def test_asking_twice_for_the_same_repo_returns_the_same_job() -> None:
+    """The double-click that caused the race. One question, one job."""
+    from app.core import jobs
+
+    registry = jobs.JobRegistry()
+    first = registry.create(key="https://github.com/pallets/flask")
+    registry.update(first.id, status="running")
+
+    assert registry.find_active("https://github.com/pallets/flask") is first
+    # A different repo is a different question.
+    assert registry.find_active("https://github.com/psf/requests") is None
+    # And a finished job never captures a fresh request.
+    registry.update(first.id, status="done")
+    assert registry.find_active("https://github.com/pallets/flask") is None

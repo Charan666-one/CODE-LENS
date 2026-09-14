@@ -7,9 +7,14 @@ import time). `run_query(name, view, **params)` is the single entry point.
 from __future__ import annotations
 
 from app.queries import (  # noqa: F401  (imported for their @register side effect)
+    architecture,
     blast_radius,
     centrality,
+    coupling,
     dependencies,
+    endpoints,
+    explain,
+    quality,
     risk,
     structure,
 )

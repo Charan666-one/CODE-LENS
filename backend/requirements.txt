@@ -19,7 +19,7 @@ pydantic==2.13.4
 pydantic-settings==2.14.2
 
 # ── Ingestion (CP-1.1) ────────────────────────────────────────────────────
-GitPython==3.1.50
+GitPython==3.1.62
 
 # ── Parser engine (CP-1.2, CP-1.3) ────────────────────────────────────────
 tree-sitter==0.25.2
@@ -36,6 +36,9 @@ networkx==3.6.1
 # The graph must be fully functional with ZERO LLM calls (ARCHITECTURE.md
 # corollary 1), so nothing here is imported before CP-3.1.
 anthropic==0.111.0
+# One SDK covers every OpenAI-compatible provider — Groq, OpenRouter, Ollama,
+# LM Studio — which is how the free tiers are reached (see semantic/llm.py).
+openai==2.43.0
 # Vector index for concept search is added at CP-3.3, once the embedding
 # backend is chosen. sqlite-vss / faiss-cpu wheels are unreliable on 3.13,
 # and nothing before Stage 3 needs them.

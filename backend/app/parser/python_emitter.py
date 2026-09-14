@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 
 import tree_sitter_python
@@ -18,7 +18,8 @@ from tree_sitter import Node as TSNode
 
 from app.graph.schema import EntrypointKind, Node, NodeKind
 from app.parser.complexity import complexity_by_line
-from app.parser.facts import FileFacts, RawBase, RawCall, RawImport
+from app.parser.facts import FileFacts, RawBase, RawCall, RawImport, RawRoute
+from app.parser.routes import join_path, parse_decorator_route, router_prefix
 
 _LANGUAGE = Language(tree_sitter_python.language())
 
@@ -57,6 +58,9 @@ class _Context:
     container_id: str  # node that CONTAINS definitions found here
     scope_id: str  # node a call site at this level is attributed to
     class_qname: str | None  # innermost enclosing class, for `self.`/`super()`
+    #: Inside an `if TYPE_CHECKING:` block, where imports are for the type
+    #: checker only and are erased at runtime.
+    type_only: bool = False
 
 
 class PythonEmitter:
@@ -105,6 +109,8 @@ class _FileWalker:
         self.source = source
         self.complexity = complexity
         self._seen_ids: set[str] = set()
+        #: variable name -> mount prefix, for routers declared in this file
+        self._router_prefixes: dict[str, str] = {}
 
     # ── traversal ─────────────────────────────────────────────────────────
 
@@ -112,7 +118,7 @@ class _FileWalker:
         kind = node.type
 
         if kind in ("import_statement", "import_from_statement"):
-            self._record_import(node)
+            self._record_import(node, ctx)
             return
         if kind == "decorated_definition":
             self._visit_decorated(node, ctx)
@@ -123,6 +129,16 @@ class _FileWalker:
         if kind == "if_statement" and self._is_main_guard(node):
             self._visit_main_guard(node, ctx)
             return
+        if kind == "if_statement" and self._is_type_checking_guard(node):
+            # Everything in here is for the type checker and gone at runtime.
+            inner = replace(ctx, type_only=True)
+            for child in node.children:
+                if child.is_named:
+                    self.visit(child, inner)
+            return
+        if kind == "assignment":
+            self._record_router(node)
+            # fall through: the right-hand side may contain calls
         if kind == "call":
             self._record_call(node, ctx)
             # fall through: arguments may contain further calls
@@ -130,6 +146,21 @@ class _FileWalker:
         for child in node.children:
             if child.is_named:
                 self.visit(child, ctx)
+
+    def _record_router(self, node: TSNode) -> None:
+        """`router = APIRouter(prefix="/api")` — remember where it mounts.
+
+        Recorded during the walk, which is enough because a router is
+        constructed above the handlers decorated with it; a file that did the
+        reverse would lose the prefix rather than get a wrong one.
+        """
+        left = node.child_by_field_name("left")
+        right = node.child_by_field_name("right")
+        if left is None or right is None or left.text is None or right.text is None:
+            return
+        prefix = router_prefix(right.text.decode("utf-8", errors="replace"))
+        if prefix is not None:
+            self._router_prefixes[left.text.decode("utf-8", errors="replace")] = prefix
 
     def _visit_decorated(self, node: TSNode, ctx: _Context) -> None:
         decorators = [
@@ -181,6 +212,27 @@ class _FileWalker:
         self.facts.nodes.append(graph_node)
         self.facts.contains.append((ctx.container_id, node_id))
 
+        # A decorated function can serve several routes — FastAPI stacking
+        # @app.get and @app.post over one handler is idiomatic — so every
+        # decorator is checked, not just the first that matches.
+        if not is_class:
+            for decorator in decorators:
+                route = parse_decorator_route(decorator)
+                if route is None:
+                    continue
+                method, path = route
+                receiver = decorator.lstrip("@").strip().split("(", 1)[0]
+                prefix = self._router_prefixes.get(receiver.rsplit(".", 2)[0])
+                self.facts.routes.append(
+                    RawRoute(
+                        method=method,
+                        path=join_path(prefix, path),
+                        handler_id=node_id,
+                        line=start_line,
+                        framework="decorator",
+                    )
+                )
+
         if ctx.container_id == self.facts.file_node.id:
             target = self.facts.module_classes if is_class else self.facts.module_functions
             target.add(name)
@@ -227,7 +279,7 @@ class _FileWalker:
 
     # ── recording ─────────────────────────────────────────────────────────
 
-    def _record_import(self, node: TSNode) -> None:
+    def _record_import(self, node: TSNode, ctx: _Context) -> None:
         line = node.start_point[0] + 1
 
         if node.type == "import_statement":
@@ -235,7 +287,8 @@ class _FileWalker:
                 if child.type == "dotted_name" and child.text is not None:
                     module = child.text.decode("utf-8", errors="replace")
                     self.facts.imports.append(
-                        RawImport(module=module, level=0, names=[], line=line)
+                        RawImport(module=module, level=0, names=[], line=line,
+                                  type_only=ctx.type_only)
                     )
                 elif child.type == "aliased_import":
                     name_node = child.child_by_field_name("name")
@@ -248,7 +301,8 @@ class _FileWalker:
                             else module
                         )
                         self.facts.imports.append(
-                            RawImport(module=module, level=0, names=[("", alias)], line=line)
+                            RawImport(module=module, level=0, names=[("", alias)], line=line,
+                                      type_only=ctx.type_only)
                         )
             return
 
@@ -281,7 +335,8 @@ class _FileWalker:
                     names.append((original, alias))
 
         self.facts.imports.append(
-            RawImport(module=module, level=level, names=names, line=line)
+            RawImport(module=module, level=level, names=names, line=line,
+                      type_only=ctx.type_only)
         )
 
     def _record_call(self, node: TSNode, ctx: _Context) -> None:
@@ -332,6 +387,20 @@ class _FileWalker:
                 found.append(current)
             stack.extend(child for child in current.children if child.is_named)
         return found
+
+    def _is_type_checking_guard(self, node: TSNode) -> bool:
+        """`if TYPE_CHECKING:` / `if t.TYPE_CHECKING:` — the standard idiom for
+        importing a name for annotations only.
+
+        It matters because it is specifically how a circular import gets
+        *broken*: Flask's config.py imports App this way precisely so that
+        sansio/app.py can import Config at runtime. Treating it as an ordinary
+        import made this tool report that fix as a circular dependency."""
+        condition = node.child_by_field_name("condition")
+        if condition is None or condition.text is None:
+            return False
+        text = condition.text.decode("utf-8", errors="replace").strip()
+        return text == "TYPE_CHECKING" or text.endswith(".TYPE_CHECKING")
 
     def _is_main_guard(self, node: TSNode) -> bool:
         condition = node.child_by_field_name("condition")
