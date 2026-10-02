@@ -208,7 +208,6 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       notice: null,
       stages: [],
       stagesShown: 0,
-      spec: null,
     });
     try {
       const result = await analyzeRepo(source);
