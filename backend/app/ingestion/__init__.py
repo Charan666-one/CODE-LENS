@@ -35,7 +35,11 @@ from app.ingestion.inventory import (
     walk_source_files,
     working_tree_size_bytes,
 )
-from app.ingestion.languages import PARSEABLE_LANGUAGES, pick_primary_language
+from app.ingestion.languages import (
+    NON_CODE_LANGUAGES,
+    PARSEABLE_LANGUAGES,
+    pick_primary_language,
+)
 
 __all__ = [
     "CloneFailedError",
@@ -81,6 +85,63 @@ class IngestedRepo(BaseModel):
     def parseable_files(self) -> list[SourceFile]:
         """Files the parser engine can actually read today (CP-1.2)."""
         return [f for f in self.files if f.language in PARSEABLE_LANGUAGES]
+
+    @property
+    def unsupported_languages(self) -> dict[str, int]:
+        """Code this parser cannot read yet, as {"Java": 212}.
+
+        Deliberately not "every language that is not parseable": Markdown,
+        YAML and the rest are skipped on purpose and counting them as a gap
+        would cry wolf on every repository. What this reports is the case
+        that matters — source code the reader can see in their editor and
+        cannot see on the graph.
+        """
+        missing: dict[str, int] = {}
+        for source_file in self.files:
+            language = source_file.language
+            if (
+                language
+                and language not in PARSEABLE_LANGUAGES
+                and language not in NON_CODE_LANGUAGES
+            ):
+                missing[language] = missing.get(language, 0) + 1
+        return dict(sorted(missing.items(), key=lambda pair: (-pair[1], pair[0])))
+
+
+#: Enough README to explain a project; not so much that a snapshot row turns
+#: into a document store. Long READMEs front-load their purpose anyway.
+_README_LIMIT = 12_000
+
+#: Checked in order, case-insensitively — the first that exists wins.
+_README_NAMES = ("README.md", "README.rst", "README.txt", "README", "readme.md")
+
+
+def _read_readme(root: Path) -> str | None:
+    """The repository's own description of itself, if it has one.
+
+    Only the root: a README inside `docs/` or a sub-package describes that
+    part, and quietly promoting one to stand for the whole project is the
+    kind of plausible-sounding guess this codebase refuses elsewhere.
+    """
+    for name in _README_NAMES:
+        candidate = root / name
+        if not candidate.is_file():
+            # Case-insensitive filesystems match above; case-sensitive ones
+            # need the explicit sweep.
+            matches = [
+                entry
+                for entry in root.iterdir()
+                if entry.is_file() and entry.name.lower() == name.lower()
+            ]
+            if not matches:
+                continue
+            candidate = matches[0]
+        try:
+            text = candidate.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        return text[:_README_LIMIT] or None
+    return None
 
 
 def ingest(
@@ -134,7 +195,21 @@ def snapshot_directory(
         total_loc=sum(source_file.loc for source_file in files),
         analyzed_at=datetime.now(UTC).isoformat(),
     )
-    return IngestedRepo(snapshot=snapshot, root=root, files=files)
+    ingested = IngestedRepo(snapshot=snapshot, root=root, files=files)
+    readme = _read_readme(root)
+    # Stamped here rather than left for a caller to recompute: the inventory
+    # is the only place that knows what was on disk, and a coverage number
+    # the payload cannot carry is one nobody will ever see.
+    return ingested.model_copy(
+        update={
+            "snapshot": snapshot.model_copy(
+                update={
+                    "unsupported_languages": ingested.unsupported_languages,
+                    "readme": readme,
+                }
+            )
+        }
+    )
 
 
 def _acquire(

@@ -33,7 +33,8 @@ from app.core import jobs
 from app.core.config import settings
 from app.core.graph_cache import cache
 from app.core.limits import reclaim_clone_cache
-from app.core.pipeline import StageReport, run_pipeline
+from app.core.pipeline import StageReport, UnreadableRepositoryError, run_pipeline
+from app.graph.parse_coverage import parsed_file_count, unsupported_languages
 from app.graph.store import SQLiteGraphStore
 from app.ingestion import IngestionError, looks_like_remote
 from app.ingestion.clone import normalize_repo_url
@@ -149,10 +150,13 @@ def analyze(request: AnalyzeRequest, http_request: Request) -> AnalyzeAccepted:
                     "edges": len(result.graph.edges),
                 },
             )
-        except IngestionError as exc:
+        except (IngestionError, UnreadableRepositoryError) as exc:
             # Ingestion errors are written for the person who typed the URL —
             # "not a valid repository", "exceeded the size limit" — and are
-            # safe and useful to return verbatim.
+            # safe and useful to return verbatim. An unreadable repository is
+            # the same shape of answer: the request is understood and cannot
+            # be satisfied, and the message names the languages that would
+            # have worked. Both are the caller's business, not an incident.
             jobs.registry.update(job.id, status="error", error=str(exc))
         except Exception:
             # Everything else is an internal failure, and `str(exc)` on one of
@@ -225,6 +229,37 @@ def analyze_status(job_id: str) -> JobStatusResponse:
 @router.get("/repos")
 def list_repos() -> list[dict[str, Any]]:
     return get_store().list_snapshots()
+
+
+@router.get("/repos/{snapshot_id}/facts")
+def repo_facts(snapshot_id: int) -> dict[str, Any]:
+    """Everything the overview page can state without asking a model.
+
+    Separate from the narrated overview on purpose: narration needs a
+    provider and can 503, and when it does the reader should still be told
+    what was measured rather than shown an apology with nothing behind it.
+    """
+    graph = cache.graph(get_store(), snapshot_id)
+    if graph is None:
+        raise HTTPException(status_code=404, detail=f"no snapshot {snapshot_id}")
+    snapshot = graph.snapshot
+    return {
+        "snapshot_id": snapshot_id,
+        "repo_url": snapshot.repo_url,
+        "commit_sha": snapshot.commit_sha,
+        "analyzed_at": snapshot.analyzed_at,
+        "primary_language": snapshot.primary_language,
+        "languages": snapshot.languages,
+        "file_count": snapshot.file_count,
+        # Derived, not read off the snapshot: the stored field defaults to 0,
+        # so every graph built before it existed would report that nothing
+        # was read. See app/graph/parse_coverage.py.
+        "parsed_file_count": parsed_file_count(graph.nodes),
+        "unsupported_languages": unsupported_languages(snapshot),
+        "has_readme": bool(snapshot.readme),
+        "nodes": len(graph.nodes),
+        "edges": len(graph.edges),
+    }
 
 
 @router.get("/repos/{snapshot_id}/viewspec")

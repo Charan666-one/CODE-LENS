@@ -1,5 +1,7 @@
 import type {
   AnalyzeResponse,
+  NarratedAnswer,
+  RepoFacts,
   BlastResult,
   Explanation,
   QueryResult,
@@ -141,6 +143,32 @@ export async function searchRepo(
       headers: { "Content-Type": "application/json" },
       cache: "no-store",
       body: JSON.stringify({ text, top }),
+    }),
+  );
+  return response.json();
+}
+
+/** Measured facts about one analysed repository. Never needs a model. */
+export async function fetchRepoFacts(snapshotId: number): Promise<RepoFacts> {
+  const response = await expectOk(
+    await fetch(`/api/repos/${snapshotId}/facts`, { cache: "no-store" }),
+  );
+  return response.json();
+}
+
+/** The project explained: its README read against its own graph.
+ *
+ *  Needs a configured provider, and says so rather than failing blankly —
+ *  a 503 here means the instance has no model, never that the repository
+ *  could not be read.
+ */
+export async function fetchOverview(snapshotId: number): Promise<NarratedAnswer> {
+  const response = await expectOk(
+    await fetch(`/api/repos/${snapshotId}/answers/overview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      body: "{}",
     }),
   );
   return response.json();

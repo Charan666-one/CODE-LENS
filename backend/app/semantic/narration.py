@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from app.graph.parse_coverage import parsed_file_count, unsupported_languages
 from app.graph.schema import NodeKind, SemanticAnnotation
 from app.graph.traversal import GraphView
 from app.queries import run_query
@@ -80,6 +81,116 @@ def narrate_project(
         model=llm.model_name,
     )
 
+
+# ── the project overview: what this is, and what the code shows ───────────
+
+_OVERVIEW_VOICE = (
+    "You are a senior engineer writing the page a new teammate reads on "
+    "their first morning. You are given the project's own README and a set "
+    "of measured facts from its dependency graph. Explain what the project "
+    "is for, then how it is actually built. "
+    "CRITICAL RULES: (1) The README states intent and may be out of date or "
+    "aspirational — the graph facts are measurements and are not. Where they "
+    "disagree, say so plainly and trust the graph. (2) Never state anything "
+    "neither source supports; no invented frameworks, no guessed purpose. "
+    "(3) Name files and modules exactly as given, so every claim is "
+    "traceable. (4) No filler, no marketing, no bullet-point padding."
+)
+
+#: Section headings the page renders. Fixed so the layout is stable and the
+#: model cannot wander into a different shape each time it is asked.
+OVERVIEW_SECTIONS = (
+    ("what", "What this project is"),
+    ("shape", "How it is built"),
+    ("start", "Where to start reading"),
+    ("watch", "What to be careful with"),
+)
+
+
+def narrate_overview(
+    view: GraphView, annotations: list[SemanticAnnotation], llm: LLMClient
+) -> NarratedAnswer:
+    """The whole project, explained: its README read against its graph.
+
+    The two halves answer different questions and neither is sufficient. A
+    README says what a project is *for* and nothing about whether the code
+    still does that; the graph measures what the code *is* and can never
+    recover why. Handing a model both, and telling it which one is evidence,
+    is what makes the result an explanation rather than either a press
+    release or a table of counts.
+    """
+    snapshot = view.snapshot
+    summaries = {a.node_id: a.summary for a in annotations}
+    # Derived for the same reason the API derives it: a snapshot taken before
+    # coverage was tracked would otherwise tell the model nothing was read.
+    parsed = parsed_file_count(view.nodes_by_id.values())
+    unread_languages = unsupported_languages(snapshot)
+
+    entry = run_query("entrypoints", view)
+    central = run_query("centrality", view, kind="file", top=8)
+    risky = run_query("risk", view, top=5)
+
+    facts: list[str] = [
+        f"Repository: {snapshot.repo_url}",
+        f"Primary language: {snapshot.primary_language}",
+        f"Files read by the parser: {parsed} of {snapshot.file_count} found",
+    ]
+    if unread_languages:
+        unread = ", ".join(
+            f"{language} ({count})" for language, count in unread_languages.items()
+        )
+        # Stated as a fact so the model describes the part of the system it
+        # can see, rather than implying it has seen all of it.
+        facts.append(f"NOT read (parser cannot yet): {unread}")
+    for kind, ids in entry.meta.get("by_kind", {}).items():
+        names = ", ".join(node_id.split(":", 1)[1] for node_id in ids[:5])
+        facts.append(f"Entry points ({kind}): {names}")
+    for ranked in central.ranked:
+        line = f"Most depended-on: {ranked.node_id.split(':', 1)[1]}"
+        line += f" (fan-in {ranked.reasons.get('fan_in')})"
+        if ranked.node_id in summaries:
+            line += f" — {summaries[ranked.node_id]}"
+        facts.append(line)
+    for ranked in risky.ranked:
+        facts.append(f"Highest risk: {ranked.node_id.split(':', 1)[1]}")
+
+    readme = (snapshot.readme or "").strip()
+    readme_block = (
+        f"THE PROJECT'S OWN README:\n{readme}"
+        if readme
+        else "THE PROJECT'S OWN README: (none found — rely on the graph alone)"
+    )
+    headings = "\n".join(f"## {title}" for _, title in OVERVIEW_SECTIONS)
+
+    text = llm.complete(
+        system=_OVERVIEW_VOICE,
+        prompt=(
+            f"{readme_block}\n\n"
+            "MEASURED FACTS FROM THE DEPENDENCY GRAPH:\n"
+            + "\n".join(f"- {fact}" for fact in facts)
+            + "\n\nWrite the page using exactly these four markdown headings, "
+            "in this order, one to three short paragraphs under each:\n"
+            + headings
+        ),
+        max_tokens=1200,
+    )
+    return NarratedAnswer(
+        question="What is this project?",
+        text=text,
+        evidence_ids=entry.node_ids
+        + [r.node_id for r in central.ranked]
+        + [r.node_id for r in risky.ranked],
+        model=llm.model_name,
+        meta={
+            "repo_url": snapshot.repo_url,
+            "primary_language": snapshot.primary_language,
+            "parsed_file_count": parsed,
+            "file_count": snapshot.file_count,
+            "unsupported_languages": unread_languages,
+            "has_readme": bool(readme),
+            "sections": [key for key, _ in OVERVIEW_SECTIONS],
+        },
+    )
 
 # ── Q6: where should I start reading? (no LLM — the order IS the answer) ──
 

@@ -153,6 +153,26 @@ class RepoSnapshot(BaseModel):
     primary_language: str
     languages: dict[str, int]          # extension census: {"py": 120, "ts": 40}
     file_count: int
+    #: How much of the repository the parser actually read.
+    #:
+    #: `file_count` is everything the walk found, which includes the README,
+    #: the lockfiles and the CI config — so on its own it has always been a
+    #: number that *sounds* like coverage and is not one. A graph built from
+    #: 135 of 164 files is a fine graph; a graph built from 0 of 212 is an
+    #: empty canvas, and before these fields nothing in the payload could
+    #: tell those two apart. Default 0 so a snapshot stored before this
+    #: existed reads as "unmeasured" rather than as "nothing was read".
+    parsed_file_count: int = 0
+    #: Code the parser cannot read yet, as {"Java": 212}. Markup, config and
+    #: prose are excluded — those are skipped on purpose and are not a gap.
+    unsupported_languages: dict[str, int] = Field(default_factory=dict)
+    #: The repository's own README, truncated.
+    #:
+    #: The graph can say what a project *is shaped like* and never what it is
+    #: *for* — that intent exists only in prose the parser skips. Captured at
+    #: ingestion because that is the one moment the working tree is on disk;
+    #: recovering it later costs a second clone.
+    readme: str | None = None
     total_loc: int | None = None
     analyzed_at: str                   # ISO timestamp
     schema_version: str = SCHEMA_VERSION

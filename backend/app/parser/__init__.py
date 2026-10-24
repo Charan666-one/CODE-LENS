@@ -185,7 +185,9 @@ def _assemble(ingested: IngestedRepo, facts: list[FileFacts]) -> KnowledgeGraph:
     )
     nodes.extend(external_nodes)
     edges.extend(external_edges)
-    snapshot = ingested.snapshot.model_copy(update={"parser_version": PARSER_VERSION})
+    snapshot = ingested.snapshot.model_copy(
+        update={"parser_version": PARSER_VERSION, "parsed_file_count": len(facts)}
+    )
     return KnowledgeGraph(snapshot=snapshot, nodes=nodes, edges=edges)
 
 

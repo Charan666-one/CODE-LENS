@@ -215,3 +215,31 @@ export interface BlastResult {
     focus?: { id: string; name: string; file_path: string | null };
   };
 }
+
+/** What the overview page can state without asking a model. */
+export interface RepoFacts {
+  snapshot_id: number;
+  repo_url: string;
+  commit_sha: string;
+  analyzed_at: string;
+  primary_language: string;
+  languages: Record<string, number>;
+  file_count: number;
+  /** How many files an emitter actually read. The difference between this
+   *  and `file_count` is the README, the lockfiles and the CI config — and,
+   *  when `unsupported_languages` is non-empty, code nobody can see. */
+  parsed_file_count: number;
+  unsupported_languages: Record<string, number>;
+  has_readme: boolean;
+  nodes: number;
+  edges: number;
+}
+
+/** A narrated answer: prose plus the node ids it was built from. */
+export interface NarratedAnswer {
+  question: string;
+  text: string;
+  evidence_ids: string[];
+  model: string | null;
+  meta: Record<string, unknown>;
+}

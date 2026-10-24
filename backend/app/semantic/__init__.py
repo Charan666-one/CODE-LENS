@@ -21,6 +21,7 @@ from app.semantic.narration import (
     NarratedAnswer,
     learning_path,
     narrate_blast_radius,
+    narrate_overview,
     narrate_project,
 )
 from app.semantic.summaries import SummaryReport, summarize_graph
@@ -40,6 +41,7 @@ __all__ = [
     "assemble",
     "learning_path",
     "narrate_blast_radius",
+    "narrate_overview",
     "narrate_project",
     "summarize_graph",
 ]

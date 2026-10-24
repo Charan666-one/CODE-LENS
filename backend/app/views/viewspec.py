@@ -25,6 +25,7 @@ from collections import deque
 import networkx as nx
 from pydantic import BaseModel, Field
 
+from app.graph.parse_coverage import parsed_file_count, unsupported_languages
 from app.graph.schema import CallConfidence, EdgeKind, KnowledgeGraph, Node, NodeKind
 from app.graph.traversal import GraphView
 
@@ -154,6 +155,14 @@ def compile_viewspec(graph: KnowledgeGraph, *, zoom: int = 2) -> ViewSpec:
     assembly = _assembly_order(view, files)
     depth_of = _depth_layers(view, files)
     depth_meta = {"depth_max": max(depth_of.values(), default=0)}
+    # Coverage rides along with the picture, because the picture is where
+    # the reader is. A gap stated only on another page is a gap most people
+    # never see, and they will read the canvas as the whole repository.
+    coverage_meta: dict[str, object] = {
+        "files_read": parsed_file_count(graph.nodes),
+        "files_found": graph.snapshot.file_count,
+        "unsupported_languages": unsupported_languages(graph.snapshot),
+    }
 
     cluster_ids = sorted(set(cluster_of.values()))
     centers = _ring_positions(cluster_ids, [
@@ -163,12 +172,12 @@ def compile_viewspec(graph: KnowledgeGraph, *, zoom: int = 2) -> ViewSpec:
     if zoom == 1:
         spec = _district_view(
             graph, view, files, cluster_of, centers, risk_of, assembly, depth_of,
-            depth_meta,
+            depth_meta, coverage_meta,
         )
     else:
         spec = _street_view(
             graph, view, files, cluster_of, centers, risk_of, assembly, depth_of,
-            depth_meta, include_members=zoom == 3,
+            depth_meta, coverage_meta, include_members=zoom == 3,
         )
     return _recenter(_scale_depth(spec))
 
@@ -215,6 +224,7 @@ def _district_view(
     assembly: dict[str, int],
     depth_of: dict[str, int],
     depth_meta: dict[str, int],
+    coverage_meta: dict[str, object],
 ) -> ViewSpec:
     """Top-level modules as single nodes; cross-module dependencies as flows."""
     members: dict[str, list[Node]] = {}
@@ -281,7 +291,12 @@ def _district_view(
         nodes=nodes,
         edges=sorted(flows.values(), key=lambda e: (-e.weight, e.source, e.target)),
         clusters=[],
-        meta={"districts": len(members), "files": len(files), **depth_meta},
+        meta={
+            "districts": len(members),
+            "files": len(files),
+            **depth_meta,
+            **coverage_meta,
+        },
     )
 
 
@@ -298,6 +313,7 @@ def _street_view(
     assembly: dict[str, int],
     depth_of: dict[str, int],
     depth_meta: dict[str, int],
+    coverage_meta: dict[str, object],
     *,
     include_members: bool,
 ) -> ViewSpec:
@@ -383,6 +399,7 @@ def _street_view(
             # it to scale the axis, and deriving it from the nodes would be the
             # frontend computing truth.
             **depth_meta,
+            **coverage_meta,
         },
     )
 

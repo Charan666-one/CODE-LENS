@@ -352,6 +352,14 @@ def test_huge_repo_is_capped_to_the_render_limit() -> None:
         # Hubs import the leaves and nothing imports the hubs, so the stack
         # is exactly two layers deep.
         "depth_max": 1,
+        # Coverage travels with the picture: the canvas is where the reader
+        # is, so it is where a gap has to be visible. Note this is the whole
+        # repository, not `rendered_nodes` — every file here was read, and
+        # the cap below only thinned what is drawn. Conflating the two would
+        # report a parser gap where there is only a render budget.
+        "files_read": total_files,
+        "files_found": total_files,
+        "unsupported_languages": {},
     }
 
 
