@@ -112,6 +112,10 @@ class IngestedRepo(BaseModel):
 #: into a document store. Long READMEs front-load their purpose anyway.
 _README_LIMIT = 12_000
 
+#: UTF-8 is at most four bytes per character, so this cannot truncate the
+#: text below the character limit above while still bounding the read.
+_READ_BYTES = _README_LIMIT * 4 + 1
+
 #: Checked in order, case-insensitively — the first that exists wins.
 _README_NAMES = ("README.md", "README.rst", "README.txt", "README", "readme.md")
 
@@ -122,24 +126,43 @@ def _read_readme(root: Path) -> str | None:
     Only the root: a README inside `docs/` or a sub-package describes that
     part, and quietly promoting one to stand for the whole project is the
     kind of plausible-sounding guess this codebase refuses elsewhere.
+
+    **A clone is untrusted input and this reads a file out of it.** Two
+    defences, both load-bearing:
+
+    *Symlinks are refused.* `README.md` in a hostile repository can be a
+    link to `/proc/self/environ`, `~/.aws/credentials` or this service's own
+    `.env`. Following it would store the backend's secrets in the snapshot
+    and — because the overview page exists — hand them to whichever model
+    provider is configured. A symlink is rejected outright rather than
+    resolved-and-checked: nothing legitimate needs the root README to be one.
+
+    *The read is bounded.* Inventory skips files over `MAX_FILE_SIZE_MB`,
+    but this read is separate from inventory, so a 2GB README under the
+    repository size cap would be loaded whole and only then sliced. Reading
+    the cap plus one byte costs nothing and removes the whole class.
     """
     for name in _README_NAMES:
         candidate = root / name
-        if not candidate.is_file():
+        if not candidate.exists():
             # Case-insensitive filesystems match above; case-sensitive ones
             # need the explicit sweep.
             matches = [
-                entry
-                for entry in root.iterdir()
-                if entry.is_file() and entry.name.lower() == name.lower()
+                entry for entry in root.iterdir() if entry.name.lower() == name.lower()
             ]
             if not matches:
                 continue
             candidate = matches[0]
+        if candidate.is_symlink() or not candidate.is_file():
+            return None
         try:
-            text = candidate.read_text(encoding="utf-8", errors="replace").strip()
+            # One byte over the limit, so truncation is detectable and a
+            # huge file never lands in memory whole.
+            with candidate.open("rb") as handle:
+                raw = handle.read(_READ_BYTES)
         except OSError:
             return None
+        text = raw.decode("utf-8", errors="replace").strip()
         return text[:_README_LIMIT] or None
     return None
 

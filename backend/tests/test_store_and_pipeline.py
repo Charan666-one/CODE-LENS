@@ -340,3 +340,42 @@ def test_the_readme_is_captured_for_the_overview(tmp_path: Path) -> None:
     assert snapshot.readme is not None
     assert "Routes parcels." in snapshot.readme
     store.close()
+
+def test_a_symlinked_readme_is_refused(tmp_path: Path) -> None:
+    """A clone is untrusted input, and this one points at the host.
+
+    `README.md` in a hostile repository can be a link to `/etc/passwd`, to
+    `~/.aws/credentials`, or to this service's own `.env`. Following it
+    would store the backend's secrets in the snapshot and — because the
+    overview page exists — hand them to whichever model provider is
+    configured. Nothing legitimate needs the root README to be a symlink.
+    """
+    secret = tmp_path / "host-secret.txt"
+    secret.write_text("GROQ_API_KEY=sk-do-not-exfiltrate\n", encoding="utf-8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.py").write_text("def go():\n    return 1\n", encoding="utf-8")
+    (repo / "README.md").symlink_to(secret)
+
+    store = SQLiteGraphStore(tmp_path / "s.db")
+    snapshot = run_pipeline(str(repo), store).graph.snapshot
+    assert snapshot.readme is None
+    assert "do-not-exfiltrate" not in (snapshot.readme or "")
+    store.close()
+
+
+def test_a_huge_readme_is_bounded_not_loaded_whole(tmp_path: Path) -> None:
+    """Inventory skips oversized files, but this read is separate from
+    inventory — so without a bound a 2GB README under the repository size
+    cap would be loaded whole and only then sliced."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.py").write_text("def go():\n    return 1\n", encoding="utf-8")
+    (repo / "README.md").write_text("x" * 400_000, encoding="utf-8")
+
+    store = SQLiteGraphStore(tmp_path / "s.db")
+    snapshot = run_pipeline(str(repo), store).graph.snapshot
+    assert snapshot.readme is not None
+    assert len(snapshot.readme) <= 12_000
+    store.close()
+

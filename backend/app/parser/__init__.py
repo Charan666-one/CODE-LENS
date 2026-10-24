@@ -60,7 +60,15 @@ __all__ = [
 #:      package root; endpoints, TESTS, CO_CHANGES, AUTHORED_BY emitted
 #:   3  per-directory tsconfig aliases; barrel re-exports recorded;
 #:      EXTERNAL_DEPENDENCY + DEPENDS_ON emitted
-PARSER_VERSION = "3"
+#:   4  README captured; parse coverage and unsupported languages recorded
+#:
+#: Note what 4 is: no edge changed, yet the version must move. The skip path
+#: in `run_pipeline` keeps a stored graph when the inventory digest and this
+#: version both match, so a repository analysed before 4 would take that
+#: path forever and come back with no README and no coverage — re-analysing
+#: it would look like a no-op. The version tracks *what the parser records*,
+#: not only how it resolves.
+PARSER_VERSION = "4"
 
 _PYTHON_EXTENSIONS = frozenset({"py", "pyi"})
 _JS_EXTENSIONS = frozenset({"js", "jsx", "mjs", "cjs"})
