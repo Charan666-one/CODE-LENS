@@ -21,11 +21,22 @@ DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 #: Per-provider defaults: (base_url, model). Chosen for the free tiers —
 #: Groq's llama-3.3-70b and Ollama's llama3.2 are both free and fast enough
 #: that a one-sentence summary feels instant.
+#: Default model per provider. **These expire.** Groq decommissioned
+#: `llama-3.3-70b-versatile` and the pinned name simply stopped existing —
+#: narration broke with no code change and no deploy, which is why the
+#: failure path below names the model and tells the reader to set
+#: `LLM_MODEL` rather than leaving them to guess.
 PROVIDER_DEFAULTS: dict[str, tuple[str, str]] = {
-    "groq": ("https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
+    "groq": ("https://api.groq.com/openai/v1", "openai/gpt-oss-120b"),
     "openrouter": ("https://openrouter.ai/api/v1", "meta-llama/llama-3.3-70b-instruct:free"),
     "ollama": ("", "llama3.2"),  # base_url comes from settings.OLLAMA_BASE_URL
 }
+
+#: A model call is a page waiting on it. The SDK's own default is 600s with
+#: two retries — half an hour of a spinner before anyone is told anything,
+#: which is how a dead model name presented as a hang rather than an error.
+_REQUEST_TIMEOUT_SECONDS = 45.0
+_MAX_RETRIES = 1
 
 
 class LLMError(Exception):
@@ -40,6 +51,31 @@ class LLMClient(Protocol):
 
     def complete(self, *, system: str, prompt: str, max_tokens: int = 300) -> str: ...
 
+
+def _explain(exc: Exception, model: str) -> str:
+    """Turn a provider error into the sentence that ends the search.
+
+    Both failures seen in practice point somewhere other than where they
+    read. A retired model name returns "404 model not found" without saying
+    *which* model, when the answer is a pinned default that expired. And a
+    rejected key is almost never the key in `.env` — it is a second one
+    exported in a shell profile, because environment variables outrank the
+    file and nothing in a 401 hints that two keys exist.
+    """
+    text = str(exc)
+    lowered = text.lower()
+    if "401" in text or "invalid api key" in lowered or "unauthorized" in lowered:
+        return (
+            f"{text} — the provider rejected the key. Note an exported "
+            "environment variable overrides the one in .env, so check "
+            "`echo $GROQ_API_KEY` (or your provider's) as well as the file."
+        )
+    if "404" in text or "model" in lowered and "not" in lowered:
+        return (
+            f"{text} (model {model!r} — if that model has been retired, set "
+            "LLM_MODEL to one your provider still serves)"
+        )
+    return f"{text} (model {model!r})"
 
 class OpenAICompatibleClient:
     """Groq, OpenRouter, Ollama, LM Studio, OpenAI — one client for all.
@@ -63,7 +99,12 @@ class OpenAICompatibleClient:
 
         # Ollama and LM Studio serve locally and ignore the key, but the SDK
         # insists on a non-empty string — hence the placeholder.
-        self._client = OpenAI(base_url=base_url, api_key=api_key or "not-needed")
+        self._client = OpenAI(
+            base_url=base_url,
+            api_key=api_key or "not-needed",
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+            max_retries=_MAX_RETRIES,
+        )
         self._model = model
 
     @property
@@ -81,7 +122,7 @@ class OpenAICompatibleClient:
                 ],
             )
         except Exception as exc:  # noqa: BLE001 - network/SDK errors become ours
-            raise LLMError(str(exc)) from exc
+            raise LLMError(_explain(exc, self._model)) from exc
         return (response.choices[0].message.content or "").strip()
 
 

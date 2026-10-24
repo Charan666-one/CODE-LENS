@@ -99,7 +99,9 @@ def test_concept_search_needs_no_llm(client: TestClient) -> None:
 # ── narrated: honest 503 without a key ────────────────────────────────────
 
 
-def test_narration_is_off_unless_switched_on(client: TestClient) -> None:
+def test_narration_is_off_unless_switched_on(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The default, and the point of the gate.
 
     A key sitting in the environment must not by itself expose a public
@@ -107,6 +109,10 @@ def test_narration_is_off_unless_switched_on(client: TestClient) -> None:
     is what an unconfigured instance does — including one whose operator has
     a key set for their own use.
     """
+    # Forced off rather than assumed off: this is a test of the gate, and
+    # it must say the same thing on a machine whose operator has narration
+    # switched on for their own use.
+    monkeypatch.setattr(settings, "NARRATION_ENABLED", False)
     snapshot_id = analyze_fixture(client)
     response = client.post(f"/api/repos/{snapshot_id}/answers/project")
 

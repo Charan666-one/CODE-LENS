@@ -20,7 +20,7 @@ import app.api.semantic_routes as semantic
 from app.core import jobs
 from app.core.budget import CallBudget
 from app.core.clients import parse_networks, resolve_client
-from app.core.config import settings
+from app.core.config import Settings, settings
 from app.core.graph_cache import cache as graph_cache
 from app.core.job_store import JobStore
 from app.graph.store import SQLiteGraphStore
@@ -126,8 +126,15 @@ def test_blocking_cannot_be_escaped_with_a_header(
 
 
 def test_narration_defaults_to_off() -> None:
-    """The safest beta default, asserted rather than assumed."""
-    assert settings.NARRATION_ENABLED is False
+    """The safest beta default, asserted rather than assumed.
+
+    Read off the field, not off the live `settings`. The instance is built
+    from the developer's own `.env`, so asserting against it made this test
+    fail for anyone who had switched narration on for themselves — a red
+    suite caused entirely by local configuration, which teaches people to
+    ignore red suites. What is being pinned here is the shipped default.
+    """
+    assert Settings.model_fields["NARRATION_ENABLED"].default is False
 
 
 def test_the_budget_refuses_past_its_cap() -> None:
