@@ -161,6 +161,154 @@ button {
   margin-right: var(--s2);
 }
 
+/* ── the overview page ───────────────────────────────────────────────── */
+/* The deliberate exception to "a query never opens a page". Reading prose is
+   not reading a graph, so this is a column of text at a comfortable measure,
+   on the same ground as the canvas. */
+
+.overview-page {
+  position: fixed;
+  inset: 0;
+  overflow-y: auto;
+  background: var(--bg);
+}
+
+.overview-top {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  padding: var(--s3) var(--s4);
+  background: linear-gradient(to bottom, var(--bg) 70%, transparent);
+}
+
+.overview-back {
+  color: var(--accent);
+  font-size: var(--text-ui);
+  text-decoration: none;
+}
+
+.overview-back:hover {
+  text-decoration: underline;
+}
+
+.overview-repo {
+  color: var(--muted);
+  font-size: var(--text-ui);
+}
+
+.overview-sheet {
+  max-width: 68ch;
+  margin: 0 auto;
+  padding: var(--s5) var(--s4) var(--s6);
+}
+
+.overview-title {
+  font-size: var(--text-title);
+  font-weight: var(--weight-strong);
+  letter-spacing: -0.01em;
+}
+
+.overview-lede {
+  margin-top: var(--s2);
+  color: var(--muted);
+  font-size: var(--text-meta);
+  font-family: var(--mono);
+}
+
+.overview-coverage {
+  margin-top: var(--s4);
+  padding: var(--s3);
+  border-left: 2px solid var(--line-strong);
+  background: var(--raised);
+  border-radius: var(--r-sm);
+  font-size: var(--text-meta);
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.overview-coverage strong {
+  color: var(--text);
+}
+
+/* A gap in what was read is a warning about everything below it, so it is
+   coloured like one. */
+.overview-gap {
+  color: var(--warn);
+}
+
+.overview-rule {
+  margin: var(--s5) 0;
+  border: none;
+  border-top: 1px solid var(--line);
+}
+
+.overview-prose h2 {
+  margin-top: var(--s5);
+  margin-bottom: var(--s2);
+  font-size: var(--text-label);
+  font-weight: var(--weight-strong);
+  color: var(--accent);
+}
+
+.overview-prose p {
+  margin-top: var(--s3);
+  font-size: var(--text-body);
+  line-height: 1.7;
+  color: var(--text);
+}
+
+.overview-model,
+.overview-loading {
+  margin-top: var(--s5);
+  color: var(--muted);
+  font-size: var(--text-meta);
+}
+
+.overview-error {
+  margin-top: var(--s4);
+  color: var(--critical);
+  font-size: var(--text-meta);
+}
+
+.overview-unavailable {
+  padding: var(--s4);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--warn);
+  border-radius: var(--r-sm);
+  background: var(--raised);
+}
+
+.overview-unavailable h2 {
+  font-size: var(--text-label);
+  font-weight: var(--weight-strong);
+}
+
+.overview-unavailable p {
+  margin-top: var(--s3);
+  font-size: var(--text-meta);
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.overview-unavailable code {
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+.overview-open {
+  color: var(--muted);
+  font-size: var(--text-meta);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.overview-open:hover {
+  color: var(--text);
+}
+
 /* ── the landing ─────────────────────────────────────────────────────── */
 
 .overlay {
@@ -927,6 +1075,37 @@ button {
 }
 
 
+
+/* ── the coverage warning ────────────────────────────────────────────── */
+/* Code the parser could not reach, said where the graph is. Yellow, like
+   the notice: the picture is sound, it is simply not the whole repository. */
+
+.coverage-bar {
+  position: absolute;
+  bottom: calc(var(--s6) + var(--s4));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  max-width: min(640px, 92vw);
+  padding: var(--s2) var(--s3);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--warn);
+  border-radius: var(--r-sm);
+  font-size: var(--text-meta);
+  color: var(--muted);
+}
+
+.coverage-mark {
+  color: var(--warn);
+  font-family: var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
 
 /* ── the notice ──────────────────────────────────────────────────────── */
 /* A request that did not complete, said once, near the readout the reader is

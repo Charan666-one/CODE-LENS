@@ -97,6 +97,45 @@ def _lock_for(source: str) -> threading.Lock:
         return _SOURCE_LOCKS.setdefault(source, threading.Lock())
 
 
+class UnreadableRepositoryError(RuntimeError):
+    """No file in the repository is in a language this parser can read.
+
+    A distinct type because the API answers it differently from a crash:
+    nothing went wrong, the request simply cannot be satisfied, and the
+    caller deserves to be told which languages would work.
+    """
+
+
+#: Below this share of a repository's code files, the graph stops being a
+#: thin view of the repository and becomes a misleading one. Deliberately
+#: low: a repository that is mostly readable should always be analysed and
+#: its gap merely reported, never refused.
+_MIN_READABLE_SHARE = 0.2
+
+
+def _nothing_to_read(ingested: IngestedRepo, readable: int) -> str:
+    """Say what was found and what would have worked, in one sentence."""
+    present = ingested.snapshot.unsupported_languages
+    if present:
+        found = ", ".join(
+            f"{language} ({count:,} file{'s' if count != 1 else ''})"
+            for language, count in list(present.items())[:3]
+        )
+        seen = f"This repository is {found}."
+    else:
+        seen = "No source files were found at all."
+    read = (
+        "Nothing here can be analysed yet"
+        if readable == 0
+        else f"Only {readable:,} file{'s' if readable != 1 else ''} here could be read"
+    )
+    return (
+        f"CodeLens reads Python, JavaScript and TypeScript. {seen} "
+        f"{read}, so no graph was built — one drawn from that little of a "
+        "repository would show you something other than your project."
+    )
+
+
 def run_pipeline(
     source: str | Path,
     store: GraphStore,
@@ -134,12 +173,34 @@ def _run_pipeline_locked(
     # commit sha, and the sha is what everything after keys on.
     started = time.monotonic()
     ingested: IngestedRepo = ingest(source, workdir=workdir, max_size_mb=max_size_mb)
+    readable = len(ingested.parseable_files)
     report(
         Stage.CLONED,
         time.monotonic() - started,
         False,
-        f"{ingested.snapshot.file_count:,} files · {ingested.snapshot.primary_language}",
+        f"{readable:,} of {ingested.snapshot.file_count:,} files · "
+        f"{ingested.snapshot.primary_language}",
     )
+
+    # Too little to read is a failure, and it has to say so here.
+    #
+    # It used to sail straight past this point: a Java repository cloned
+    # fine, reported "212 files · Java", parsed into a graph of exactly one
+    # node, and handed the canvas an empty scene with `status: done` on it.
+    # Every honest signal the product has — the confidence ladder, the
+    # Ledger, the refusal to show an accuracy badge — is undone by a blank
+    # screen that claims to be an answer.
+    #
+    # The bar is a *share* of the code, not zero, and that distinction is
+    # the whole fix. `golang/example` is 37 Go files and one stray
+    # parseable one: a zero-check passes it, and the reader gets a canvas
+    # holding a single dot for a repository they know is full of code. A
+    # graph drawn from 3% of the source is not a thin picture of that
+    # repository, it is a picture of something else.
+    unreadable = sum(ingested.snapshot.unsupported_languages.values())
+    code_files = readable + unreadable
+    if code_files and readable / code_files < _MIN_READABLE_SHARE:
+        raise UnreadableRepositoryError(_nothing_to_read(ingested, readable))
 
     # The skip check — is this exact repository state already analysed? The
     # commit sha finds the candidate row, but the *content digest* decides:

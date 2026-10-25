@@ -37,6 +37,7 @@ from app.semantic import (
     build_llm,
     learning_path,
     narrate_blast_radius,
+    narrate_overview,
     narrate_project,
     summarize_graph,
 )
@@ -162,6 +163,23 @@ def answer_project(snapshot_id: int, http_request: Request) -> dict[str, Any]:
 class BlastStoryRequest(BaseModel):
     node_id: str = Field(min_length=1, max_length=512)
     max_depth: int | None = Field(default=None, ge=1, le=32)
+
+
+@router.post("/answers/overview")
+def answer_overview(snapshot_id: int, http_request: Request) -> dict[str, Any]:
+    """The whole project explained: its README read against its own graph.
+
+    Charged like any other narration because it is one LLM call against the
+    operator's key, and gated the same way — a 503 here says the instance has
+    no provider configured, never that the repository could not be read.
+    """
+    admission.charge_narration(http_request)
+    graph = _load(snapshot_id)
+    llm = get_llm()
+    try:
+        return narrate_overview(_view(snapshot_id), graph.annotations, llm).model_dump()
+    except LLMError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.post("/answers/blast_radius")

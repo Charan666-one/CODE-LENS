@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.core.pipeline import Stage, StageReport, run_pipeline
+import pytest
+
+from app.core.pipeline import Stage, StageReport, UnreadableRepositoryError, run_pipeline
 from app.graph.schema import EdgeKind, KnowledgeGraph
 from app.graph.store import SQLiteGraphStore
 from app.graph.traversal import GraphView
@@ -172,7 +174,10 @@ def test_progress_events_are_the_real_stages(tmp_path: Path) -> None:
     # appear somewhere in the graph it describes. A stage that measured
     # nothing says nothing rather than guessing.
     by_stage = {entry.stage: entry for entry in result.stages}
-    assert by_stage[Stage.CLONED].detail == "1 files \u00b7 Python"
+    # "N of M" rather than "M": the clone stage reports coverage, because
+    # the file count alone never distinguished a repository that was read
+    # from one that merely existed.
+    assert by_stage[Stage.CLONED].detail == "1 of 1 files · Python"
     assert by_stage[Stage.PARSED].detail == f"{len(result.graph.nodes):,} nodes"
     assert by_stage[Stage.GRAPH_BUILT].detail == f"{len(result.graph.edges):,} relationships"
 
@@ -243,3 +248,134 @@ def test_asking_twice_for_the_same_repo_returns_the_same_job() -> None:
     # And a finished job never captures a fresh request.
     registry.update(first.id, status="done")
     assert registry.find_active("https://github.com/pallets/flask") is None
+
+# ── coverage: the product must never claim to have read what it cannot ────
+
+
+def _write_repo(root: Path, files: dict[str, str]) -> Path:
+    for name, body in files.items():
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+    return root
+
+
+def test_a_repository_in_an_unreadable_language_is_refused(tmp_path: Path) -> None:
+    """The bug this guards: a Java repository cloned fine, reported "4 files
+    · Java", parsed to a graph of one node, and returned `status: done` with
+    an empty canvas behind it. A blank screen presented as an answer undoes
+    every honest signal the product has."""
+    _write_repo(tmp_path, {"src/App.java": "class App { void run() {} }"})
+    store = SQLiteGraphStore(tmp_path / "s.db")
+    with pytest.raises(UnreadableRepositoryError) as caught:
+        run_pipeline(str(tmp_path), store)
+    message = str(caught.value)
+    assert "Python, JavaScript and TypeScript" in message  # what would work
+    assert "Java" in message  # what was actually found
+    store.close()
+
+
+def test_a_repository_with_one_readable_file_among_many_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The case a zero-check let through. `golang/example` is 37 Go files
+    and one stray parseable one, so "readable == 0" was false and the reader
+    got a canvas holding a single dot for a repository full of code. A graph
+    drawn from 3% of the source is a picture of something else."""
+    files = {f"svc/handler{i}.go": "package main" for i in range(12)}
+    files["scripts/tidy.py"] = "def tidy():\n    return 1\n"
+    _write_repo(tmp_path, files)
+    store = SQLiteGraphStore(tmp_path / "s.db")
+    with pytest.raises(UnreadableRepositoryError) as caught:
+        run_pipeline(str(tmp_path), store)
+    assert "Go (12 files)" in str(caught.value)
+    assert "Only 1 file" in str(caught.value)
+    store.close()
+
+
+def test_a_mostly_readable_repository_is_analysed_and_says_what_it_missed(
+    tmp_path: Path,
+) -> None:
+    """The other side of the same line. A repository that is mostly readable
+    must never be refused — the graph is sound, and the gap is reported
+    rather than used as a reason to show nothing."""
+    files = {f"app/mod{i}.py": f"def f{i}():\n    return {i}\n" for i in range(9)}
+    files["tools/legacy.go"] = "package tools"  # not vendor/: that is an ignored dir
+    _write_repo(tmp_path, files)
+    store = SQLiteGraphStore(tmp_path / "s.db")
+    snapshot = run_pipeline(str(tmp_path), store).graph.snapshot  # no refusal
+    assert snapshot.unsupported_languages == {"Go": 1}
+    store.close()
+
+
+def test_coverage_counts_only_code_the_parser_cannot_read(tmp_path: Path) -> None:
+    """Markdown and YAML are skipped on purpose and must not be reported as
+    a gap — crying wolf on every repository would make the number useless."""
+    _write_repo(
+        tmp_path,
+        {
+            "main.py": "def go():\n    return 1\n",
+            "README.md": "# Thing\n\nIt does the thing.\n",
+            "ci.yaml": "on: push\n",
+            "Worker.java": "class Worker {}",
+        },
+    )
+    store = SQLiteGraphStore(tmp_path / "s.db")
+    snapshot = run_pipeline(str(tmp_path), store).graph.snapshot
+    assert snapshot.parsed_file_count == 1
+    assert snapshot.file_count == 4
+    assert snapshot.unsupported_languages == {"Java": 1}  # not Markdown, not YAML
+    store.close()
+
+
+def test_the_readme_is_captured_for_the_overview(tmp_path: Path) -> None:
+    """The graph can say what a project is shaped like and never what it is
+    for. That lives in prose the parser skips, so ingestion keeps it."""
+    _write_repo(
+        tmp_path,
+        {"main.py": "def go():\n    return 1\n", "README.md": "# Atlas\n\nRoutes parcels.\n"},
+    )
+    store = SQLiteGraphStore(tmp_path / "s.db")
+    snapshot = run_pipeline(str(tmp_path), store).graph.snapshot
+    assert snapshot.readme is not None
+    assert "Routes parcels." in snapshot.readme
+    store.close()
+
+def test_a_symlinked_readme_is_refused(tmp_path: Path) -> None:
+    """A clone is untrusted input, and this one points at the host.
+
+    `README.md` in a hostile repository can be a link to `/etc/passwd`, to
+    `~/.aws/credentials`, or to this service's own `.env`. Following it
+    would store the backend's secrets in the snapshot and — because the
+    overview page exists — hand them to whichever model provider is
+    configured. Nothing legitimate needs the root README to be a symlink.
+    """
+    secret = tmp_path / "host-secret.txt"
+    secret.write_text("GROQ_API_KEY=sk-do-not-exfiltrate\n", encoding="utf-8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.py").write_text("def go():\n    return 1\n", encoding="utf-8")
+    (repo / "README.md").symlink_to(secret)
+
+    store = SQLiteGraphStore(tmp_path / "s.db")
+    snapshot = run_pipeline(str(repo), store).graph.snapshot
+    assert snapshot.readme is None
+    assert "do-not-exfiltrate" not in (snapshot.readme or "")
+    store.close()
+
+
+def test_a_huge_readme_is_bounded_not_loaded_whole(tmp_path: Path) -> None:
+    """Inventory skips oversized files, but this read is separate from
+    inventory — so without a bound a 2GB README under the repository size
+    cap would be loaded whole and only then sliced."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.py").write_text("def go():\n    return 1\n", encoding="utf-8")
+    (repo / "README.md").write_text("x" * 400_000, encoding="utf-8")
+
+    store = SQLiteGraphStore(tmp_path / "s.db")
+    snapshot = run_pipeline(str(repo), store).graph.snapshot
+    assert snapshot.readme is not None
+    assert len(snapshot.readme) <= 12_000
+    store.close()
+

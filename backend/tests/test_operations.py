@@ -18,9 +18,9 @@ import app.api.admission as admission
 import app.api.routes as routes
 import app.api.semantic_routes as semantic
 from app.core import jobs
-from app.core.budget import CallBudget
+from app.core.budget import BudgetStore, CallBudget
 from app.core.clients import parse_networks, resolve_client
-from app.core.config import settings
+from app.core.config import Settings, settings
 from app.core.graph_cache import cache as graph_cache
 from app.core.job_store import JobStore
 from app.graph.store import SQLiteGraphStore
@@ -126,8 +126,68 @@ def test_blocking_cannot_be_escaped_with_a_header(
 
 
 def test_narration_defaults_to_off() -> None:
-    """The safest beta default, asserted rather than assumed."""
-    assert settings.NARRATION_ENABLED is False
+    """The safest beta default, asserted rather than assumed.
+
+    Read off the field, not off the live `settings`. The instance is built
+    from the developer's own `.env`, so asserting against it made this test
+    fail for anyone who had switched narration on for themselves — a red
+    suite caused entirely by local configuration, which teaches people to
+    ignore red suites. What is being pinned here is the shipped default.
+    """
+    assert Settings.model_fields["NARRATION_ENABLED"].default is False
+
+
+def test_the_budget_survives_a_restart(tmp_path: Path) -> None:
+    """The hole this closes. A container in a crash loop re-granted the
+    whole cap on every restart, so the single control protecting the bill
+    was the one that forgot — and an attacker who can cause a crash gets
+    the budget again for free."""
+    db = tmp_path / "spend.db"
+    first = CallBudget(limit=2)
+    store = BudgetStore(db)
+    first.attach(store)
+    assert first.allow()
+    assert first.allow()
+    assert not first.allow()
+    store.close()
+
+    # A new process, same disk: the spend is remembered.
+    second = CallBudget(limit=2)
+    reopened = BudgetStore(db)
+    second.attach(reopened)
+    assert not second.allow()
+    assert second.used == 2
+    reopened.close()
+
+
+def test_the_budget_replenishes_when_the_window_turns(tmp_path: Path) -> None:
+    """Durability without a window would be worse than what it replaced:
+    spend the cap once and narration is dead permanently, with no way back
+    short of an operator editing the database."""
+    store = BudgetStore(tmp_path / "spend.db")
+    budget_ = CallBudget(limit=1, window_hours=24)
+    budget_.attach(store)
+    assert budget_.allow()
+    assert not budget_.allow()
+
+    # Tomorrow is a different bucket, and the cap is whole again.
+    tomorrow = budget_.current_window().replace("2026", "2027")
+    assert store.claim(tomorrow, 1) is True
+    store.close()
+
+
+def test_a_broken_database_never_fails_the_budget_open(tmp_path: Path) -> None:
+    """A degraded disk must cost at most what the old in-memory design
+    always cost. Falling back to counting in memory keeps the cap for this
+    process; failing open would turn a disk problem into a bill."""
+    store = BudgetStore(tmp_path / "spend.db")
+    store.close()  # every later statement now raises ProgrammingError
+    budget_ = CallBudget(limit=2)
+    budget_.attach(store)
+
+    assert budget_.allow()
+    assert budget_.allow()
+    assert not budget_.allow()  # still bounded, just in memory
 
 
 def test_the_budget_refuses_past_its_cap() -> None:

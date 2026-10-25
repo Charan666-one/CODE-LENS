@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect } from "react";
 import SearchBar from "@/components/SearchBar";
 import { STAGE_COPY, impactCounts } from "@/lib/impact";
@@ -37,6 +38,28 @@ export default function HUD() {
   const dimension = useGraphStore((s) => s.dimension);
   const setDimension = useGraphStore((s) => s.setDimension);
   const notice = useGraphStore((s) => s.notice);
+  const snapshotId = useGraphStore((s) => s.snapshotId);
+
+  // Only worth saying when there is code the parser could not reach; the
+  // README and the lockfiles are skipped by design and are not a gap.
+  const meta = spec?.meta as
+    | {
+        files_read?: number;
+        files_found?: number;
+        unsupported_languages?: Record<string, number>;
+      }
+    | undefined;
+  const unsupported = Object.entries(meta?.unsupported_languages ?? {});
+  const gap =
+    unsupported.length > 0 && meta?.files_read !== undefined
+      ? {
+          read: meta.files_read,
+          found: meta.files_found ?? 0,
+          unread: unsupported
+            .map(([language, count]) => `${language} (${count})`)
+            .join(", "),
+        }
+      : null;
   const clearNotice = useGraphStore((s) => s.clearNotice);
 
   // Restore the reader's last choice here rather than in the store, because
@@ -66,6 +89,14 @@ export default function HUD() {
         <span className="brand">CodeLens</span>
         <span className="repo">{repoName}</span>
         <SearchBar />
+        {/* The one link out of the canvas. The graph answers "what is this
+            shaped like"; it has no way to answer "what is this for", and
+            that question is the first one a stranger has. */}
+        {snapshotId !== null && (
+          <Link className="overview-open" href={`/overview/${snapshotId}`} title="What is this project?">
+            Overview
+          </Link>
+        )}
         <button
           className="guide-open"
           onClick={() => setGuide(true)}
@@ -129,6 +160,22 @@ export default function HUD() {
           <button className="overlay-clear" onClick={clearNotice} aria-label="Dismiss">
             ✕
           </button>
+        </div>
+      )}
+
+      {/* A repository the parser could only partly read, said on the canvas
+          rather than only on the overview page. Someone reading the graph
+          has no other way to know that code they can see in their editor is
+          missing from the picture in front of them — and they will take the
+          picture for the whole repository, because that is what it looks
+          like. Absent when everything was read, so it never becomes chrome. */}
+      {gap && (
+        <div className="coverage-bar" role="status">
+          <span className="coverage-mark">partial</span>
+          <span>
+            Read {gap.read.toLocaleString()} of {gap.found.toLocaleString()} files.{" "}
+            {gap.unread} not read — this graph is missing that code.
+          </span>
         </div>
       )}
 

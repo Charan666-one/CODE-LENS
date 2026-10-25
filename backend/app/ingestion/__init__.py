@@ -35,7 +35,11 @@ from app.ingestion.inventory import (
     walk_source_files,
     working_tree_size_bytes,
 )
-from app.ingestion.languages import PARSEABLE_LANGUAGES, pick_primary_language
+from app.ingestion.languages import (
+    NON_CODE_LANGUAGES,
+    PARSEABLE_LANGUAGES,
+    pick_primary_language,
+)
 
 __all__ = [
     "CloneFailedError",
@@ -81,6 +85,86 @@ class IngestedRepo(BaseModel):
     def parseable_files(self) -> list[SourceFile]:
         """Files the parser engine can actually read today (CP-1.2)."""
         return [f for f in self.files if f.language in PARSEABLE_LANGUAGES]
+
+    @property
+    def unsupported_languages(self) -> dict[str, int]:
+        """Code this parser cannot read yet, as {"Java": 212}.
+
+        Deliberately not "every language that is not parseable": Markdown,
+        YAML and the rest are skipped on purpose and counting them as a gap
+        would cry wolf on every repository. What this reports is the case
+        that matters — source code the reader can see in their editor and
+        cannot see on the graph.
+        """
+        missing: dict[str, int] = {}
+        for source_file in self.files:
+            language = source_file.language
+            if (
+                language
+                and language not in PARSEABLE_LANGUAGES
+                and language not in NON_CODE_LANGUAGES
+            ):
+                missing[language] = missing.get(language, 0) + 1
+        return dict(sorted(missing.items(), key=lambda pair: (-pair[1], pair[0])))
+
+
+#: Enough README to explain a project; not so much that a snapshot row turns
+#: into a document store. Long READMEs front-load their purpose anyway.
+_README_LIMIT = 12_000
+
+#: UTF-8 is at most four bytes per character, so this cannot truncate the
+#: text below the character limit above while still bounding the read.
+_READ_BYTES = _README_LIMIT * 4 + 1
+
+#: Checked in order, case-insensitively — the first that exists wins.
+_README_NAMES = ("README.md", "README.rst", "README.txt", "README", "readme.md")
+
+
+def _read_readme(root: Path) -> str | None:
+    """The repository's own description of itself, if it has one.
+
+    Only the root: a README inside `docs/` or a sub-package describes that
+    part, and quietly promoting one to stand for the whole project is the
+    kind of plausible-sounding guess this codebase refuses elsewhere.
+
+    **A clone is untrusted input and this reads a file out of it.** Two
+    defences, both load-bearing:
+
+    *Symlinks are refused.* `README.md` in a hostile repository can be a
+    link to `/proc/self/environ`, `~/.aws/credentials` or this service's own
+    `.env`. Following it would store the backend's secrets in the snapshot
+    and — because the overview page exists — hand them to whichever model
+    provider is configured. A symlink is rejected outright rather than
+    resolved-and-checked: nothing legitimate needs the root README to be one.
+
+    *The read is bounded.* Inventory skips files over `MAX_FILE_SIZE_MB`,
+    but this read is separate from inventory, so a 2GB README under the
+    repository size cap would be loaded whole and only then sliced. Reading
+    the cap plus one byte costs nothing and removes the whole class.
+    """
+    for name in _README_NAMES:
+        candidate = root / name
+        if not candidate.exists():
+            # Case-insensitive filesystems match above; case-sensitive ones
+            # need the explicit sweep.
+            matches = [
+                entry for entry in root.iterdir() if entry.name.lower() == name.lower()
+            ]
+            if not matches:
+                continue
+            candidate = matches[0]
+        if candidate.is_symlink() or not candidate.is_file():
+            return None
+        try:
+            # One byte over the limit, so truncation is detectable and a
+            # huge file never lands in memory whole.
+            with candidate.open("rb") as handle:
+                raw = handle.read(_READ_BYTES)
+        except OSError:
+            return None
+        text = raw.decode("utf-8", errors="replace").strip()
+        return text[:_README_LIMIT] or None
+    return None
 
 
 def ingest(
@@ -134,7 +218,21 @@ def snapshot_directory(
         total_loc=sum(source_file.loc for source_file in files),
         analyzed_at=datetime.now(UTC).isoformat(),
     )
-    return IngestedRepo(snapshot=snapshot, root=root, files=files)
+    ingested = IngestedRepo(snapshot=snapshot, root=root, files=files)
+    readme = _read_readme(root)
+    # Stamped here rather than left for a caller to recompute: the inventory
+    # is the only place that knows what was on disk, and a coverage number
+    # the payload cannot carry is one nobody will ever see.
+    return ingested.model_copy(
+        update={
+            "snapshot": snapshot.model_copy(
+                update={
+                    "unsupported_languages": ingested.unsupported_languages,
+                    "readme": readme,
+                }
+            )
+        }
+    )
 
 
 def _acquire(
