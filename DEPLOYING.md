@@ -133,13 +133,17 @@ nothing else changes. The UI never calls them.
 
 ```yaml
 NARRATION_ENABLED: "true"
-NARRATION_MAX_CALLS: 500     # model calls for the life of the process
+NARRATION_MAX_CALLS: 500     # model calls per window, across every client
+NARRATION_BUDGET_WINDOW_HOURS: 24  # how often that ceiling replenishes
 RATE_LIMIT_NARRATIONS: 20    # per client per window
 GROQ_API_KEY: ${GROQ_API_KEY}
 ```
 
-3. Watch `narration_budget_exhausted` in the logs. It fires once, when the
-   process budget is gone, and narration 503s until a restart.
+3. Watch `narration_budget_exhausted` in the logs. It fires once per window,
+   when the budget is gone, and narration 503s until the window turns over.
+   The count lives in the SQLite volume, so a restart — or a crash loop —
+   does not hand the cap back. If that volume is unwritable the counter
+   falls back to per-process memory: still capped, never unbounded.
 
 The key is read from the environment, is never sent to the frontend, and is
 never logged. Do not bake it into an image.

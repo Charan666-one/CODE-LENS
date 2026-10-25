@@ -112,11 +112,14 @@ class Settings(BaseSettings):
     #: environment should not by itself expose a public endpoint that spends
     #: it. Enabling requires saying so, in one variable, on purpose.
     NARRATION_ENABLED: bool = False
-    #: Hard ceiling on model calls for the life of the process, across every
-    #: client. The per-client rate limit bounds requests; this bounds the
-    #: bill. Restarting resets it, which is the honest scope of an in-process
-    #: budget — a durable one needs the provider's own spend cap (DEPLOYING.md).
+    #: Hard ceiling on model calls per window, across every client. The
+    #: per-client rate limit bounds requests; this bounds the bill.
     NARRATION_MAX_CALLS: int = 500
+    #: How often the ceiling above replenishes. A durable counter with no
+    #: window would be worse than the in-process one it replaced: spend the
+    #: cap once and narration is dead permanently, with no way back short of
+    #: an operator editing the database by hand.
+    NARRATION_BUDGET_WINDOW_HOURS: int = 24
 
     # Unset until CP-3.2. Absence must never break the graph pipeline.
     ANTHROPIC_API_KEY: str | None = None

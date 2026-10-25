@@ -9,6 +9,7 @@ from app.api.body_limit import BodyLimitMiddleware
 from app.api.routes import router as api_router
 from app.api.semantic_routes import router as semantic_router
 from app.core import jobs
+from app.core.budget import BudgetStore, budget
 from app.core.config import settings
 from app.core.job_store import JobStore
 
@@ -25,10 +26,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     store = JobStore(settings.SQLITE_PATH)
     jobs.registry.attach(store)
+    # The spend cap counts in the same database, for the same reason: a
+    # counter that a crash loop resets is not a cap on anything.
+    spend = BudgetStore(settings.SQLITE_PATH)
+    budget.attach(spend)
     try:
         yield
     finally:
         store.close()
+        spend.close()
 
 
 def create_app() -> FastAPI:
