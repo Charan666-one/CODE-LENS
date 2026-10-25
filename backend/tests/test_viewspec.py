@@ -482,3 +482,55 @@ def test_render_cap_applies_at_zoom_three_too() -> None:
     file_nodes = [n for n in spec.nodes if n.kind == "file"]
     assert len(file_nodes) == _MAX_RENDERED_FILES
     assert spec.meta["truncated"] is True
+
+
+def _partly_readable_graph(
+    python_files: int, *, found: int, unsupported: dict[str, int] | None
+) -> KnowledgeGraph:
+    """A repository the parser could only partly read."""
+    nodes = [
+        Node(
+            id=f"file:app/mod{index}.py",
+            kind=NodeKind.FILE,
+            name=f"mod{index}.py",
+            qualified_name=f"app/mod{index}.py",
+            file_path=f"app/mod{index}.py",
+        )
+        for index in range(python_files)
+    ]
+    snapshot = RepoSnapshot(
+        repo_url="https://example.test/partly/readable",
+        commit_sha="2" * 40,
+        primary_language="Java",
+        # The census counts what is on disk, not what was read.
+        languages={"py": python_files, "java": found - python_files},
+        file_count=found,
+        unsupported_languages=unsupported or {},
+        analyzed_at="2026-01-01T00:00:00+00:00",
+    )
+    return KnowledgeGraph(snapshot=snapshot, nodes=nodes, edges=[])
+
+
+def test_the_spec_says_how_much_of_the_repository_it_drew() -> None:
+    """The canvas warns that code is missing from the picture, and it can
+    only do that if the spec carries the numbers. Lose these three keys and
+    the graph stops being wrong — it goes on being a partial view while no
+    longer admitting it, which is the failure the reader cannot detect."""
+    graph = _partly_readable_graph(30, found=100, unsupported={"Java": 70})
+    meta = compile_viewspec(graph, zoom=2).meta
+    assert meta["files_read"] == 30
+    assert meta["files_found"] == 100
+    assert meta["unsupported_languages"] == {"Java": 70}
+
+
+def test_a_snapshot_stored_before_coverage_existed_still_tells_the_truth() -> None:
+    """24 snapshots predate the field, and a default of `{}` would have them
+    all claim a clean read. The census is re-derived instead, so an old graph
+    names its gap exactly like a new one — and `files_read` counts File nodes
+    rather than trusting `parsed_file_count`, which those snapshots left at
+    0 and which would otherwise report "read 0 files" over a working graph."""
+    graph = _partly_readable_graph(30, found=100, unsupported=None)
+    assert graph.snapshot.parsed_file_count == 0  # never measured, not "none read"
+    meta = compile_viewspec(graph, zoom=2).meta
+    assert meta["files_read"] == 30  # derived from the File nodes that exist
+    assert meta["unsupported_languages"] == {"Java": 70}  # derived from the census

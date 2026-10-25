@@ -142,14 +142,39 @@ export default function OverviewPage({
  *  headings and prose beneath them, so everything a full parser adds here is
  *  surface for a prompt to inject HTML through. The output is plain text in
  *  React elements, which cannot execute.
+ *
+ *  **A heading is found per line, not per block.** Splitting on blank lines
+ *  alone assumed the model puts one between a heading and the prose under
+ *  it, and it does not: it writes `## Heading\nBody`, which arrives as a
+ *  single block whose `^#{1,3}` match then fails — `$` and `.*` cannot cross
+ *  the newline. Every overview rendered all four of its headings as literal
+ *  `##` inside a paragraph. The page had no `<h2>` in it at all.
  */
 function renderMarkdown(text: string) {
-  const blocks = text.split(/\n{2,}/).map((block) => block.trim()).filter(Boolean);
-  return blocks.map((block, index) => {
-    const heading = block.match(/^#{1,3}\s+(.*)$/);
-    if (heading) {
-      return <h2 key={index}>{heading[1]}</h2>;
+  const rendered: React.ReactNode[] = [];
+  for (const block of text.split(/\n{2,}/)) {
+    let prose: string[] = [];
+    // Paragraph lines are rejoined with their newlines so the bullet rule
+    // below still sees line starts, and so a wrapped list stays a list.
+    const flushProse = () => {
+      const body = prose.join("\n").trim();
+      prose = [];
+      if (body) {
+        rendered.push(
+          <p key={rendered.length}>{body.replace(/^[-*]\s+/gm, "• ")}</p>,
+        );
+      }
+    };
+    for (const line of block.split("\n")) {
+      const heading = line.match(/^\s*#{1,3}\s+(.*?)\s*$/);
+      if (heading) {
+        flushProse();
+        rendered.push(<h2 key={rendered.length}>{heading[1]}</h2>);
+      } else {
+        prose.push(line);
+      }
     }
-    return <p key={index}>{block.replace(/^[-*]\s+/gm, "• ")}</p>;
-  });
+    flushProse();
+  }
+  return rendered;
 }

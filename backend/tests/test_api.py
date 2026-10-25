@@ -188,3 +188,44 @@ def test_repos_listing(client: TestClient) -> None:
     snapshot_id = analyze_fixture(client)
     listed = client.get("/api/repos").json()
     assert any(row["snapshot_id"] == snapshot_id for row in listed)
+
+
+def test_an_unreadable_repository_fails_the_job_with_the_reason(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """The refusal has to survive the HTTP layer intact, because the landing
+    page prints `error` verbatim and has nothing else to say.
+
+    `run_pipeline` raising is already covered; this covers the half the
+    reader actually meets. `UnreadableRepositoryError` shares an `except`
+    with `IngestionError` precisely so it is answered as the caller's
+    business rather than as an incident — drop it from that tuple and the
+    generic handler below takes it instead, replacing a sentence that names
+    Go with "quote this job id". The screen would go back to the landing
+    page saying nothing useful, which is the empty-canvas bug wearing a
+    different hat.
+    """
+    repo = tmp_path / "mostly-go"
+    (repo / "svc").mkdir(parents=True)
+    for index in range(12):
+        (repo / "svc" / f"handler{index}.go").write_text("package main\n")
+    (repo / "tidy.py").write_text("def tidy():\n    return 1\n")
+
+    accepted = client.post("/api/analyze", json={"source": str(repo)})
+    assert accepted.status_code == 202, accepted.text
+    job_id = accepted.json()["job_id"]
+
+    deadline = time.monotonic() + 10.0
+    body: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        body = client.get(f"/api/analyze/{job_id}").json()
+        if body["status"] in {"done", "error"}:
+            break
+        time.sleep(0.02)
+
+    assert body["status"] == "error", f"a 12-Go-file repo must not report success: {body}"
+    assert body["snapshot_id"] is None  # nothing to open, so nothing is offered
+    message = body["error"]
+    assert "Python, JavaScript and TypeScript" in message  # what would have worked
+    assert "Go (12 files)" in message  # what was actually there
+    assert "job" not in message.lower()  # not the generic internal-failure text
