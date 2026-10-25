@@ -36,6 +36,33 @@ jobs:
       - name: Tests (pytest)
         run: pytest -q
 
+  frontend:
+    name: frontend (tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `lib/choreography.ts` is the only frontend code that decides anything:
+      # every colour, size and hidden flag the 2D and 3D renderers draw comes
+      # out of `buildFrame`, and both call it. The renderers themselves are
+      # WebGL and are checked by looking at them; this is the part a test can
+      # hold still. The compile check is the images job, which builds the real
+      # production bundle.
+      - name: Tests (vitest)
+        run: npm test
+
   audit:
     name: dependencies (known vulnerabilities)
     runs-on: ubuntu-latest
